@@ -1,0 +1,12 @@
+# Локальные секреты и журналы
+.env
+.env.*
+*.log
+*.tmp
+*.swp
+*~
+vps-toolkit-ru-v*-review*.zip
+
+# Файлы редактора
+.idea/
+.vscode/
