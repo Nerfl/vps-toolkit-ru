@@ -82,9 +82,31 @@ external_bbr=$(bbr_enable) || fail 'Проверка внешней настро
 bbr_current() { printf 'cubic\n'; }
 fail2ban_existing_custom() { return 1; }
 package_installed() { return 1; }
-sshd() { printf 'port 22\n'; }
-ss() { printf 'LISTEN 0 128 0.0.0.0:22 0.0.0.0:* users:(("sshd",pid=123,fd=3))\n'; }
-service_active() { return 1; }
+MOCK_SSHD_CONFIG='port 22'
+MOCK_SS_OUTPUT='LISTEN 0 128 0.0.0.0:22 0.0.0.0:* users:(("sshd",pid=123,fd=3))'
+MOCK_MAIN_PID=123
+MOCK_SOCKET_LISTEN='22 (Stream)'
+MOCK_SSH_SERVICE_ACTIVE=1
+MOCK_SSH_SOCKET_ACTIVE=0
+MOCK_F2B_ACTIVE=0
+sshd() { printf '%s\n' "$MOCK_SSHD_CONFIG"; }
+ss() { printf '%s\n' "$MOCK_SS_OUTPUT"; }
+service_active() {
+    case "$1" in
+        ssh.service) (( MOCK_SSH_SERVICE_ACTIVE ));;
+        ssh.socket) (( MOCK_SSH_SOCKET_ACTIVE ));;
+        fail2ban) (( MOCK_F2B_ACTIVE ));;
+        *) return 1;;
+    esac
+}
+systemctl() {
+    [[ ${1:-} == show && ${2:-} == -p && ${4:-} == --value ]] || fail 'Неожиданный вызов systemctl в smoke-тесте.'
+    case "${3:-}:${5:-}" in
+        MainPID:ssh.service) printf '%s\n' "$MOCK_MAIN_PID";;
+        Listen:ssh.socket) printf '%s\n' "$MOCK_SOCKET_LISTEN";;
+        *) fail 'Неожиданный запрос к systemctl в smoke-тесте.';;
+    esac
+}
 F2B_CONFIG=$test_config
 f2b_plan=$(fail2ban_install_configure) || fail 'Просмотр настройки Fail2Ban завершился ошибкой.'
 [[ $f2b_plan == *'План:'* ]] || fail 'План настройки Fail2Ban не показан.'
@@ -100,14 +122,13 @@ custom_jail=$(fail2ban_install_configure) || fail 'Проверка пользо
 [[ $custom_jail == *'сохранена без изменений'* ]] || fail 'Пользовательская настройка Fail2Ban не защищена.'
 fail2ban_existing_custom() { return 1; }
 package_installed() { return 0; }
+MOCK_F2B_ACTIVE=1
 fail2ban-client() {
     if [[ ${1:-} == get ]]; then
         case ${3:-} in maxretry) printf '5\n';; findtime) printf '600\n';; bantime) printf '3600\n';; esac
     fi
     return 0
 }
-service_active() { return 0; }
-systemctl() { [[ ${1:-} == list-sockets ]] && printf '0.0.0.0:22 ssh.socket ssh@.service\n'; }
 fail2ban_desired_config > "$F2B_CONFIG"
 fail2ban_existing_custom() { return 0; }
 override_result=$(fail2ban_install_configure) || fail 'Проверка переопределения jail завершилась ошибкой.'
@@ -129,25 +150,61 @@ fail2ban-client() {
     fi
     return 0
 }
-ss() { printf 'LISTEN 0 128 0.0.0.0:2222 0.0.0.0:* users:(("sshd",pid=123,fd=3))\n'; }
+MOCK_SS_OUTPUT=$(printf '%s\n' \
+    'LISTEN 0 128 0.0.0.0:22 0.0.0.0:* users:(("sshd",pid=123,fd=3))' \
+    'LISTEN 0 128 [::]:22 [::]:* users:(("sshd",pid=123,fd=4))')
+dual_stack=$(fail2ban_ssh_port_safe) || fail 'Два адреса SSH-порта 22 не распознаны.'
+[[ $dual_stack == *'Порт SSH 22 подтверждён'* && $dual_stack != *'22 22'* ]] || fail 'IPv4 и IPv6 одного SSH-порта не объединены.'
+MOCK_SS_OUTPUT=$(printf '%s\n' \
+    'LISTEN 0 128 0.0.0.0:22 0.0.0.0:* users:(("sshd",pid=123,fd=3))' \
+    'LISTEN 0 128 [::]:22 [::]:* users:(("sshd",pid=123,fd=4))' \
+    'LISTEN 0 128 127.0.0.1:6010 0.0.0.0:* users:(("sshd",pid=456,fd=5))' \
+    'LISTEN 0 128 [::1]:6010 [::]:* users:(("sshd",pid=456,fd=6))')
+x11_listener=$(fail2ban_ssh_port_safe) || fail 'X11 forwarding ошибочно принят за серверный SSH-порт.'
+[[ $x11_listener == *'Порт SSH 22 подтверждён'* && $x11_listener != *6010* ]] || fail 'Дочерний SSH/X11 listener не исключён.'
+MOCK_SS_OUTPUT='LISTEN 0 128 127.0.0.1:22 0.0.0.0:* users:(("sshd",pid=123,fd=3))'
+loopback_server=$(fail2ban_ssh_port_safe) || fail 'Настоящий SSH listener на loopback ошибочно отклонён.'
+[[ $loopback_server == *'Порт SSH 22 подтверждён'* ]] || fail 'SSH listener на loopback не подтверждён.'
+MOCK_SS_OUTPUT='LISTEN 0 128 0.0.0.0:2222 0.0.0.0:* users:(("sshd",pid=123,fd=3))'
 port_mismatch=$(fail2ban_install_configure) || fail 'Проверка расхождения портов завершилась ошибкой.'
 [[ $port_mismatch == *'Фактические порты SSH: 2222'* && $port_mismatch == *'Автоматическая настройка jail отменена'* ]] || fail 'Расхождение sshd -T и ss не остановило настройку.'
-ss() { printf 'LISTEN 0 128 0.0.0.0:22 0.0.0.0:*\n'; }
+MOCK_SS_OUTPUT='LISTEN 0 128 0.0.0.0:22 0.0.0.0:*'
 unknown_listener=$(fail2ban_install_configure) || fail 'Проверка неизвестного listener завершилась ошибкой.'
 [[ $unknown_listener == *'Фактический TCP listener SSH не определён'* ]] || fail 'Неизвестный listener SSH принят.'
-ss() { printf 'LISTEN 0 128 0.0.0.0:22 0.0.0.0:* users:(("systemd",pid=1,fd=3))\n'; }
+MOCK_SSH_SERVICE_ACTIVE=0
+MOCK_SSH_SOCKET_ACTIVE=1
+MOCK_SOCKET_LISTEN='ListenStream=22'
+MOCK_SS_OUTPUT='LISTEN 0 128 0.0.0.0:22 0.0.0.0:* users:(("systemd",pid=1,fd=3))'
 socket_listener=$(fail2ban_install_configure) || fail 'Проверка ssh.socket завершилась ошибкой.'
 [[ $socket_listener == *'Порт SSH 22 подтверждён'* ]] || fail 'Активный ssh.socket на порту 22 не распознан.'
-ss() { printf 'LISTEN 0 128 0.0.0.0:22 0.0.0.0:* users:(("sshd",pid=123,fd=3))\n'; }
+MOCK_SOCKET_LISTEN=$(printf '%s\n' 'Listen=0.0.0.0:22 (Stream)' 'Listen=[::]:22 (Stream)')
+socket_dual_stack=$(fail2ban_ssh_port_safe) || fail 'Два ListenStream ssh.socket на порту 22 не распознаны.'
+[[ $socket_dual_stack == *'Порт SSH 22 подтверждён'* ]] || fail 'IPv4 и IPv6 ssh.socket не объединены.'
+MOCK_SOCKET_LISTEN=$(printf '%s\n' 'Listen=0.0.0.0:22 (Stream)' 'Listen=[::]:2222 (Stream)')
+socket_multiple=$(fail2ban_install_configure) || fail 'Проверка нескольких ListenStream завершилась ошибкой.'
+[[ $socket_multiple == *'Порты ssh.socket: 22 2222'* && $socket_multiple == *'Автоматическая настройка jail отменена'* ]] || fail 'Несколько портов ssh.socket не остановили настройку.'
+MOCK_SSH_SERVICE_ACTIVE=1
+MOCK_SSH_SOCKET_ACTIVE=0
+MOCK_SS_OUTPUT=$(printf '%s\n' \
+    'LISTEN 0 128 0.0.0.0:22 0.0.0.0:* users:(("sshd",pid=123,fd=3))' \
+    'LISTEN 0 128 [::]:22 [::]:* users:(("sshd",pid=123,fd=4))' \
+    'LISTEN 0 128 127.0.0.1:2222 0.0.0.0:* users:(("sshd",pid=123,fd=5))')
+multiple_server_ports=$(fail2ban_install_configure) || fail 'Проверка нескольких портов основного sshd завершилась ошибкой.'
+[[ $multiple_server_ports == *'Фактические порты SSH: 22 2222'* && $multiple_server_ports == *'Автоматическая настройка jail отменена'* ]] || fail 'Несколько реальных SSH-портов не остановили настройку.'
+MOCK_SS_OUTPUT='LISTEN 0 128 0.0.0.0:22 0.0.0.0:* users:(("sshd",pid=123,fd=3))'
+MOCK_MAIN_PID=0
+unknown_main_pid=$(fail2ban_install_configure) || fail 'Проверка неизвестного MainPID завершилась ошибкой.'
+[[ $unknown_main_pid == *'MainPID службы ssh.service не определён'* && $unknown_main_pid == *'Автоматическая настройка jail отменена'* ]] || fail 'Неизвестный MainPID не остановил настройку.'
+MOCK_MAIN_PID=123
 rm -f -- "$F2B_CONFIG"
 external_jail=$(fail2ban_install_configure) || fail 'Проверка внешнего jail завершилась ошибкой.'
 [[ $external_jail == *'Существующие правила сохранены'* ]] || fail 'Внешний jail был присвоен toolkit.'
 fail2ban-client() { return 1; }
-service_active() { return 1; }
+MOCK_F2B_ACTIVE=0
 stopped_service=$(fail2ban_install_configure) || fail 'Проверка остановленного Fail2Ban завершилась ошибкой.'
 [[ $stopped_service == *'План:'* ]] || fail 'Остановленный Fail2Ban не предложен к настройке.'
 package_installed() { return 1; }
-sshd() { printf 'port 2222\n'; }
+MOCK_SSHD_CONFIG='port 2222'
 custom_port=$(fail2ban_install_configure) || fail 'Проверка нестандартного SSH-порта завершилась ошибкой.'
 [[ $custom_port == *'Автоматическая настройка jail отменена'* ]] || fail 'Нестандартный SSH-порт не остановил настройку.'
 updates_plan=$(updates_available) || fail 'Проверка обновлений в режиме просмотра завершилась ошибкой.'

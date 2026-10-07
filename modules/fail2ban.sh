@@ -45,8 +45,30 @@ fail2ban_config_managed() {
         || diff -q "$F2B_CONFIG" <(fail2ban_previous_config) >/dev/null 2>&1
 }
 
+fail2ban_socket_listen_ports() {
+    local output line token previous endpoint port
+    local -a tokens
+    output=$(systemctl show -p Listen --value ssh.socket 2>/dev/null) || return 1
+    [[ -n $output ]] || return 1
+    while IFS= read -r line; do
+        read -r -a tokens <<< "$line"
+        previous=''
+        for token in "${tokens[@]}"; do
+            case "$token" in
+                ListenStream=*) endpoint=${token#ListenStream=} ;;
+                '(Stream)') endpoint=${previous#Listen=} ;;
+                *) previous=$token; continue ;;
+            esac
+            port=${endpoint##*:}
+            [[ $port =~ ^[0-9]+$ ]] && (( 10#$port >= 1 && 10#$port <= 65535 )) || return 1
+            printf '%s\n' "$port"
+            previous=$token
+        done
+    done <<< "$output"
+}
+
 fail2ban_ssh_port_safe() {
-    local configured listening socket_list line endpoint port ports='' socket_ports=''
+    local configured listening line endpoint port ports='' socket_ports='' main_pid='' state recv send peer rest
     if ! has_cmd sshd || ! has_cmd ss; then
         say_warn 'Нет sshd или ss: невозможно сверить настроенный и фактический порт SSH.'; return 1
     fi
@@ -55,38 +77,37 @@ fail2ban_ssh_port_safe() {
     if [[ $configured != 22 ]]; then
         say_warn "Настроенные порты SSH: ${configured:-неизвестно}; требуется единственный порт 22."; return 1
     fi
-    listening=$(ss -H -ltnp 2>/dev/null) || { say_warn 'Не удалось получить список TCP listener через ss.'; return 1; }
     if service_active ssh.socket; then
-        socket_list=$(systemctl list-sockets --all --no-legend --no-pager ssh.socket 2>/dev/null) || {
-            say_warn 'Активен ssh.socket, но не удалось прочитать его порт.'; return 1;
-        }
-        while IFS= read -r line; do
-            [[ $line == *ssh.socket* ]] || continue
-            endpoint=${line%%[[:space:]]*}
-            port=${endpoint##*:}
-            [[ $port =~ ^[0-9]+$ ]] || { say_warn 'Порт ssh.socket не удалось разобрать.'; return 1; }
-            socket_ports+="$port "
-        done <<< "$socket_list"
-        [[ -n $socket_ports ]] || { say_warn 'Активен ssh.socket, но его порт не определён.'; return 1; }
-        [[ $(tr ' ' '\n' <<< "$socket_ports" | sed '/^$/d' | sort -u) == 22 ]] || {
-            say_warn "Порт ssh.socket отличается от 22: $socket_ports"; return 1;
-        }
+        socket_ports=$(fail2ban_socket_listen_ports) || { say_warn 'Не удалось прочитать TCP ListenStream активного ssh.socket.'; return 1; }
+        socket_ports=$(awk 'NF && !seen[$0]++ {printf "%s%s", sep, $0; sep=" "} END {print ""}' <<< "$socket_ports")
+        [[ -n $socket_ports ]] || { say_warn 'TCP ListenStream активного ssh.socket не определён.'; return 1; }
+        [[ $socket_ports == 22 ]] || { say_warn "Порты ssh.socket: $socket_ports; требуется единственный порт 22."; return 1; }
     fi
+    if service_active ssh.service; then
+        main_pid=$(systemctl show -p MainPID --value ssh.service 2>/dev/null) || {
+            say_warn 'Не удалось определить MainPID службы ssh.service.'; return 1;
+        }
+        main_pid=${main_pid#MainPID=}
+        [[ $main_pid =~ ^[1-9][0-9]*$ ]] || { say_warn 'MainPID службы ssh.service не определён однозначно.'; return 1; }
+    fi
+    [[ -n $main_pid || -n $socket_ports ]] || { say_warn 'Ни ssh.service, ни ssh.socket не подтверждены как активные.'; return 1; }
+    listening=$(ss -H -ltnp 2>/dev/null) || { say_warn 'Не удалось получить список TCP listener через ss.'; return 1; }
     while IFS= read -r line; do
-        if [[ $line == *'users:(("sshd"'* ]]; then :
-        elif [[ -n $socket_ports && $line == *'users:(("systemd"'* ]]; then :
-        else continue; fi
-        endpoint=$(awk '{print $4}' <<< "$line")
+        read -r state recv send endpoint peer rest <<< "$line"
+        [[ $state == LISTEN && $endpoint == *:* ]] || continue
         port=${endpoint##*:}
         [[ $port =~ ^[0-9]+$ ]] || { say_warn 'Не удалось разобрать фактический порт SSH.'; return 1; }
-        if [[ $line == *'users:(("systemd"'* && " $socket_ports " != *" $port "* ]]; then continue; fi
+        if [[ -n $main_pid && $line == *"\"sshd\",pid=$main_pid,"* ]]; then :
+        elif [[ -n $socket_ports && " $socket_ports " == *" $port "* && $line == *'"systemd",pid=1,'* ]]; then :
+        else continue; fi
         ports+="$port "
     done <<< "$listening"
     [[ -n $ports ]] || { say_warn 'Фактический TCP listener SSH не определён.'; return 1; }
-    [[ $(tr ' ' '\n' <<< "$ports" | sed '/^$/d' | sort -u) == 22 ]] || {
+    ports=$(tr ' ' '\n' <<< "$ports" | awk 'NF && !seen[$0]++ {printf "%s%s", sep, $0; sep=" "} END {print ""}')
+    [[ $ports == 22 ]] || {
         say_warn "Фактические порты SSH: $ports; требуется единственный порт 22."; return 1;
     }
-    say_info 'Порт SSH 22 подтверждён в sshd -T и фактических TCP listener.'
+    say_info 'Порт SSH 22 подтверждён в sshd -T и listener основного sshd или ssh.socket.'
 }
 
 fail2ban_effective_settings() {
