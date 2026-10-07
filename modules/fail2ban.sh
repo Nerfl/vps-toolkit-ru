@@ -228,13 +228,13 @@ fail2ban_install_configure() {
         fail2ban_effective_settings || true
         return 0
     fi
-    if ! confirm 'Установить и настроить Fail2Ban?'; then say_info 'Действие отменено.'; return 0; fi
+    if ! confirm_yes_no 'Установить и настроить Fail2Ban?'; then say_info 'Действие отменено.'; return 0; fi
     if (( DRY_RUN )); then
         if ! package_installed fail2ban; then say_info 'План: установить пакет fail2ban через apt-get.'; fi
         say_info "План: создать или обновить $F2B_CONFIG, проверить конфигурацию и перезапустить сервис."
         return 0
     fi
-    if ! confirm 'Подтвердите наличие доступа к консоли провайдера или второго рабочего SSH-сеанса'; then
+    if ! confirm_yes_no 'Подтвердите наличие доступа к консоли провайдера или второго рабочего SSH-сеанса'; then
         say_info 'Настройка отменена ради сохранения доступа к серверу.'; return 0
     fi
     prepare_mutation || return 1
@@ -260,7 +260,7 @@ fail2ban_unban() {
     printf 'Введите IP для разблокировки: '
     IFS= read -r ip || return
     if ! valid_ip "$ip"; then say_error 'Некорректный IP-адрес.'; return 1; fi
-    if ! confirm "Разблокировать IP $ip?"; then say_info 'Действие отменено.'; return; fi
+    if ! confirm_yes_no "Разблокировать IP $ip?"; then say_info 'Действие отменено.'; return; fi
     if (( DRY_RUN )); then say_info "План: разблокировать IP $ip в jail sshd."; return; fi
     prepare_mutation || return 1
     if fail2ban-client set sshd unbanip "$ip" >/dev/null 2>&1; then

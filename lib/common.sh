@@ -21,11 +21,15 @@ check_platform() {
     [[ $id == ubuntu && ( $version == 22.04 || $version == 24.04 ) ]]
 }
 
-confirm() {
+confirm_yes_no() {
     local answer
-    printf '%s [д/Н]: ' "$1"
+    printf '%s [y/N]: ' "$1"
     IFS= read -r answer || return 1
-    [[ $answer == [дДyY] || $answer == [дД][аА] || $answer == [yY][eE][sS] ]]
+    case "$answer" in
+        y|Y) return 0;;
+        ''|n|N) return 1;;
+        *) say_warn 'Ответ не распознан; действие отменено.'; return 1;;
+    esac
 }
 
 pause_menu() {

@@ -29,6 +29,19 @@ done
 for address in '1.2.3.4; rm -rf /' 999.1.1.1 001.2.3.4 1.2.3 1.2.3.4: 1:::2 1:2:3:4:5:6:7:8:9; do
     if valid_ip "$address"; then fail "Неправильный IP принят: $address"; fi
 done
+for answer in y Y; do
+    confirmation=$(printf '%s\n' "$answer" | confirm_yes_no 'Тестовое подтверждение?') || fail "Ответ $answer не принят как подтверждение."
+    [[ $confirmation == *'[y/N]:'* ]] || fail 'Формат приглашения подтверждения неверен.'
+done
+for answer in n N '' да yes неверно; do
+    if confirmation=$(printf '%s\n' "$answer" | confirm_yes_no 'Тестовое подтверждение?'); then
+        fail "Ответ ${answer:-Enter} ошибочно принят как подтверждение."
+    fi
+    [[ $confirmation == *'[y/N]:'* ]] || fail 'Формат приглашения подтверждения неверен.'
+done
+if confirm_yes_no 'Тестовое подтверждение?' </dev/null >/dev/null; then
+    fail 'Конец ввода ошибочно принят как подтверждение.'
+fi
 
 test_config=$(mktemp) || fail 'Не удалось создать временный файл теста.'
 conflict_file=$(mktemp) || fail 'Не удалось создать файл проверки sysctl.'
@@ -42,7 +55,7 @@ if bbr_file_owned; then fail 'Изменённый файл BBR принят к�
 rm -f -- "$BBR_CONFIG"
 
 DRY_RUN=1
-confirm() { return 0; }
+confirm_yes_no() { return 0; }
 bbr_current() { printf 'cubic\n'; }
 bbr_qdisc() { printf 'fq_codel\n'; }
 bbr_supported() { return 0; }

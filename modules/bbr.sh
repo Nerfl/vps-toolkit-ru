@@ -182,7 +182,7 @@ bbr_enable() {
         saved_qdisc=$(bbr_saved_value previous_qdisc) || return 1
     fi
     say_info 'BBR не гарантирует улучшение для любого трафика.'
-    if ! confirm 'Включить BBR для TCP и очередь fq?'; then say_info 'Действие отменено.'; return 0; fi
+    if ! confirm_yes_no 'Включить BBR для TCP и очередь fq?'; then say_info 'Действие отменено.'; return 0; fi
     if (( DRY_RUN )); then say_info "План: сохранить копию при необходимости, записать $BBR_CONFIG и применить два параметра ядра."; return 0; fi
     prepare_mutation || return 1
     bbr_apply_enable "$saved_cc" "$saved_qdisc" "$old_cc" "$old_qdisc" || return 1
@@ -230,7 +230,7 @@ bbr_disable() {
             restore_cc=cubic
         else say_error 'Безопасный алгоритм для возврата не найден; отключение отменено.'; return 1; fi
     fi
-    if ! confirm "Удалить файл toolkit и установить $restore_cc / $restore_qdisc?"; then say_info 'Действие отменено.'; return 0; fi
+    if ! confirm_yes_no "Удалить файл toolkit и установить $restore_cc / $restore_qdisc?"; then say_info 'Действие отменено.'; return 0; fi
     if (( DRY_RUN )); then say_info "План: сохранить копию, удалить $BBR_CONFIG и применить $restore_cc / $restore_qdisc."; return 0; fi
     prepare_mutation || return 1
     bbr_apply_disable "$restore_cc" "$restore_qdisc" "$active_cc" "$active_qdisc"

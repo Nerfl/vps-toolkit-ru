@@ -17,7 +17,7 @@ updates_available() {
 }
 
 apt_refresh() {
-    if ! confirm 'Будет выполнено apt-get update. Продолжить?'; then say_info 'Действие отменено.'; return; fi
+    if ! confirm_yes_no 'Будет выполнено apt-get update. Продолжить?'; then say_info 'Действие отменено.'; return; fi
     require_commands apt-get || return 1
     run_step 'Обновление списков пакетов: apt-get update' apt_run update || return $?
     if (( ! DRY_RUN )); then log_action INFO 'Обновлены списки пакетов apt' || return 1; say_ok 'Списки пакетов обновлены.'; fi
@@ -46,7 +46,7 @@ apt_upgrade_safe() {
     printf '\nБудет выполнено: apt-get update, затем apt-get upgrade.\n'
     printf 'Автоматическое удаление пакетов и перезагрузка не выполняются.\n'
     say_warn 'Не прерывайте apt во время изменения пакетов; при прерывании проверьте состояние dpkg вручную.'
-    if ! confirm 'Продолжить обновление системы?'; then say_info 'Действие отменено.'; return; fi
+    if ! confirm_yes_no 'Продолжить обновление системы?'; then say_info 'Действие отменено.'; return; fi
     require_commands apt-get || return 1
     if (( DRY_RUN )); then
         say_info 'План: выполнить apt-get update; после него показать расчёт обновления и запросить отдельное подтверждение apt-get upgrade.'
@@ -57,17 +57,14 @@ apt_upgrade_safe() {
     apt_preview_upgrade || return $?
     if (( APT_PREVIEW_COUNT == 0 )); then say_info 'Обновлять нечего; apt-get upgrade не запускается.'; return 0; fi
     say_warn 'При обновлении пакетов службы могут быть перезапущены, включая службы, влияющие на удалённое подключение.'
-    if ! confirm 'Сейчас выполнить apt-get upgrade для перечисленных пакетов?'; then say_info 'Обновление пакетов отменено.'; return 0; fi
+    if ! confirm_yes_no 'Сейчас выполнить apt-get upgrade для перечисленных пакетов?'; then say_info 'Обновление пакетов отменено.'; return 0; fi
     run_step 'Обновление пакетов: apt-get upgrade' apt_run upgrade || return $?
     log_action INFO 'Выполнены apt-get update и apt-get upgrade' || return 1
     say_ok 'Обновление завершено.'
     if [[ -e /var/run/reboot-required ]]; then
         say_warn 'Для применения обновлений требуется перезагрузка сервера.'
-        printf 'Перезагрузить сервер сейчас?\n1. Да\n2. Нет\nВыберите пункт: '
-        local answer
-        IFS= read -r answer || return 0
-        if [[ $answer == 1 ]]; then
-            if confirm 'Подтвердите перезагрузку удалённого сервера'; then
+        if confirm_yes_no 'Перезагрузить сервер сейчас?'; then
+            if confirm_yes_no 'Подтвердите перезагрузку удалённого сервера?'; then
                 log_action WARN 'Пользователь подтвердил перезагрузку сервера' || return 1
                 if ! systemctl reboot >/dev/null 2>&1; then
                     say_error 'Не удалось запустить перезагрузку.'
