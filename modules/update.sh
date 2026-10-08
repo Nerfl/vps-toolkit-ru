@@ -79,13 +79,13 @@ apt_upgrade_safe() {
 update_menu() {
     local choice
     while true; do
-        printf '\n════════ ОБНОВЛЕНИЕ СИСТЕМЫ ════════\n1. Проверить наличие обновлений\n2. apt update\n3. apt update && apt upgrade\n4. Назад\nВыберите пункт: '
+        printf '\n════════ ОБНОВЛЕНИЕ СИСТЕМЫ ════════\n1. Проверить наличие обновлений\n2. apt update\n3. apt update && apt upgrade\n0. Назад\nВыберите пункт: '
         IFS= read -r choice || return 0
         case "$choice" in
             1) updates_available; pause_menu;;
             2) apt_refresh; pause_menu;;
             3) apt_upgrade_safe; pause_menu;;
-            4) return;;
+            0) return;;
             *) say_warn 'Неизвестный пункт меню.';;
         esac
     done

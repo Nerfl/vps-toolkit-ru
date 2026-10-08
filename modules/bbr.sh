@@ -26,6 +26,9 @@ bbr_status() {
         else say_info 'Модуль tcp_bbr не виден в lsmod; он может быть встроен в ядро.'; fi
     fi
     say_info 'BBR влияет на TCP; прямого эффекта на UDP, QUIC и Hysteria2 нет.'
+    if [[ $cc == bbr && $qdisc == fq ]]; then
+        say_info 'После плановой перезагрузки проверьте: net.ipv4.tcp_congestion_control = bbr и net.core.default_qdisc = fq. Автоматической перезагрузки нет.'
+    fi
 }
 
 bbr_config_content() {
@@ -53,49 +56,100 @@ bbr_file_owned() {
 }
 
 bbr_sysctl_files() {
-    local root=${1:-} file dir
+    local root=${1:-} file dir managed="$root/etc/sysctl.d/99-vps-toolkit-bbr.conf"
     for dir in "$root"/etc/sysctl.d "$root"/run/sysctl.d "$root"/usr/local/lib/sysctl.d "$root"/usr/lib/sysctl.d "$root"/lib/sysctl.d; do
-        if [[ -d $dir && ( ! -r $dir || ! -x $dir ) ]]; then return 1; fi
+        [[ -e $dir || -L $dir ]] || continue
+        [[ -d $dir && ! -L $dir && -r $dir && -x $dir ]] || return 1
     done
     for file in "$root"/etc/sysctl.conf "$root"/etc/sysctl.d/*.conf "$root"/run/sysctl.d/*.conf \
         "$root"/usr/local/lib/sysctl.d/*.conf "$root"/usr/lib/sysctl.d/*.conf "$root"/lib/sysctl.d/*.conf; do
-        [[ -f $file && $file != "$BBR_CONFIG" ]] && printf '%s\n' "$file"
+        [[ -e $file || -L $file ]] || continue
+        [[ $file != *$'\n'* ]] || return 1
+        [[ -f $file && ! -L $file && -r $file ]] || return 1
+        [[ $file == "$managed" ]] || printf '%s\n' "$file"
     done
     return 0
 }
 
 bbr_sysctl_conflicts() {
-    local file files found=0
-    files=$(bbr_sysctl_files "${1:-}") || { printf 'Не удалось перечислить файлы sysctl.\n'; return 1; }
+    local root=${1:-} file files definitions key value ignore basename target label note
+    local issues='' earlier='' LC_ALL=C
+    files=$(bbr_sysctl_files "$root") || { printf 'Не удалось полностью перечислить безопасные файлы sysctl.\n'; return 1; }
     [[ -n $files ]] || return 0
     while IFS= read -r file; do
-        [[ -r $file ]] || { printf 'Недоступен для чтения: %s\n' "$file"; found=1; continue; }
-        awk -v path="$file" '
+        if [[ ! -f $file || -L $file || ! -r $file ]]; then
+            issues+="Недоступен или необычен источник sysctl: $file"$'\n'
+            continue
+        fi
+        definitions=$(awk -v path="$file" '
             /^[[:space:]]*[#;]/ {next}
             {
-                sub(/[[:space:]]*[#;].*$/, "")
-                separator=index($0, "=")
-                if (!separator) next
-                key=substr($0, 1, separator-1)
-                value=substr($0, separator+1)
-                gsub(/[[:space:]]/, "", key)
-                normalized=key
-                sub(/^-+/, "", normalized)
-                if (normalized != "net.ipv4.tcp_congestion_control" && normalized != "net.core.default_qdisc") next
-                gsub(/^[[:space:]]+|[[:space:]]+$/, "", value)
-                if ((key != normalized && key != "-" normalized) || value !~ /^[a-zA-Z0-9_]+$/) {
-                    printf "Неоднозначное определение sysctl: %s:%d\n", path, FNR
-                    invalid=1
+                line=$0
+                sub(/[[:space:]]+[#;].*$/, "", line)
+                separator=index(line, "=")
+                if (!separator) {
+                    bare=line
+                    gsub(/[[:space:]]/, "", bare)
+                    ignore_bare=(substr(bare, 1, 1) == "-")
+                    sub(/^-+/, "", bare)
+                    gsub(/\//, ".", bare)
+                    if (!ignore_bare && (bare == "net.ipv4.tcp_congestion_control" || bare == "net.core.default_qdisc"))
+                        errors=errors sprintf("Неоднозначное определение sysctl: %s:%d\n", path, FNR)
                     next
                 }
-                if ((normalized == "net.ipv4.tcp_congestion_control" && value != "bbr") ||
-                    (normalized == "net.core.default_qdisc" && value != "fq"))
-                    printf "%s: %s = %s\n", path, normalized, value
+                key=substr(line, 1, separator-1)
+                value=substr(line, separator+1)
+                gsub(/^[[:space:]]+|[[:space:]]+$/, "", key)
+                normalized=key
+                sub(/^-+/, "", normalized)
+                gsub(/\//, ".", normalized)
+                compact=normalized
+                gsub(/[[:space:]]/, "", compact)
+                if (normalized != "net.ipv4.tcp_congestion_control" && normalized != "net.core.default_qdisc") {
+                    if (compact == "net.ipv4.tcp_congestion_control" || compact == "net.core.default_qdisc")
+                        errors=errors sprintf("Неоднозначное определение sysctl: %s:%d\n", path, FNR)
+                    next
+                }
+                gsub(/^[[:space:]]+|[[:space:]]+$/, "", value)
+                canonical=key
+                sub(/^-/, "", canonical)
+                gsub(/\//, ".", canonical)
+                if (canonical != normalized || value !~ /^[a-zA-Z0-9_]+$/) {
+                    errors=errors sprintf("Неоднозначное определение sysctl: %s:%d\n", path, FNR)
+                    next
+                }
+                ignore=(substr(key, 1, 1) == "-" ? 1 : 0)
+                if (seen[normalized] && (previous[normalized] != value || previous_ignore[normalized] != ignore)) {
+                    errors=errors sprintf("Противоречивые определения sysctl: %s:%d\n", path, FNR)
+                    next
+                }
+                if (!seen[normalized]++) records[++count]=normalized "\t" value "\t" ignore
+                previous[normalized]=value
+                previous_ignore[normalized]=ignore
             }
-            END {if (invalid) exit 2}
-        ' "$file" || { printf 'Ошибка чтения: %s\n' "$file"; found=1; }
+            END {
+                if (errors != "") {printf "%s", errors; exit 2}
+                for (i=1; i<=count; i++) print records[i]
+            }
+        ' "$file") || { issues+="${definitions:-Ошибка чтения: $file}"$'\n'; continue; }
+        [[ -n $definitions ]] || continue
+        basename=${file##*/}
+        while IFS=$'\t' read -r key value ignore; do
+            if [[ $key == net.core.default_qdisc ]]; then target=fq label=qdisc
+            else target=bbr label='TCP congestion control'; fi
+            note=''
+            [[ $ignore == 1 ]] && note=' (ведущий «-»: ошибка применения игнорируется)'
+            if [[ $file == "$root/etc/sysctl.conf" ]]; then
+                [[ $value == "$target" ]] || issues+="Позднее определение в $file: $key = $value$note"$'\n'
+            elif [[ $basename < 99-vps-toolkit-bbr.conf ]]; then
+                [[ $value == "$target" ]] || earlier+="Более ранняя настройка $label: $file = $value$note"$'\n'
+            else
+                issues+="Определение может примениться после файла toolkit: $file: $key = $value$note"$'\n'
+            fi
+        done <<< "$definitions"
     done <<< "$files"
-    (( found == 0 ))
+    if [[ -n $issues ]]; then printf '%s' "$issues"; return 1; fi
+    [[ -z $earlier ]] || printf '%s' "$earlier"
 }
 
 bbr_transaction_exit() {
@@ -132,7 +186,7 @@ bbr_apply_enable() (
     trap 'exit 143' TERM
     require_commands sysctl mktemp || return 1
     if [[ -f $BBR_CONFIG ]]; then backup_file "$BBR_CONFIG" || return 1; BBR_PREVIOUS=$BACKUP_LAST; fi
-    BBR_TMP=$(mktemp /etc/sysctl.d/.vps-toolkit-bbr.XXXXXX) || { say_error 'Не удалось создать временный файл BBR.'; return 1; }
+    BBR_TMP=$(mktemp "${BBR_CONFIG}.XXXXXX") || { say_error 'Не удалось создать временный файл BBR.'; return 1; }
     bbr_config_content "$saved_cc" "$saved_qdisc" > "$BBR_TMP" || return 1
     chmod 0644 "$BBR_TMP" 2>/dev/null || return 1
     BBR_CHANGED=1
@@ -153,19 +207,17 @@ bbr_apply_enable() (
 )
 
 bbr_enable() {
-    local old_cc old_qdisc saved_cc saved_qdisc conflicts
+    local old_cc old_qdisc saved_cc saved_qdisc analysis line
     if [[ -e $BBR_CONFIG || -L $BBR_CONFIG ]] && ! bbr_file_owned; then
         say_warn 'Файл BBR изменён вручную или является ссылкой; автоматическая перезапись отменена.'; return 0
     fi
     old_cc=$(bbr_current) || { say_error 'Не удалось прочитать текущий TCP-алгоритм.'; return 1; }
     old_qdisc=$(bbr_qdisc) || { say_error 'Не удалось прочитать текущую очередь.'; return 1; }
-    conflicts=$(bbr_sysctl_conflicts) || { say_warn "$conflicts"; say_warn 'Проверка других файлов sysctl неполная; включение BBR отменено.'; return 0; }
-    if [[ -n $conflicts ]]; then
-        say_warn 'Найдены конфликтующие определения sysctl:'
-        printf '%s\n' "$conflicts"
-        say_warn 'После перезагрузки порядок применения файлов может изменить результат. Включение BBR отменено; чужие файлы не изменяются.'
+    analysis=$(bbr_sysctl_conflicts) || {
+        say_warn "$analysis"
+        say_warn 'Порядок или содержимое sysctl не подтверждены. Включение BBR отменено; чужие файлы не изменяются.'
         return 0
-    fi
+    }
     if [[ $old_cc == bbr && ! -e $BBR_CONFIG ]]; then
         say_info 'BBR уже настроен вне toolkit. Эта настройка сохранена без изменений.'; return 0
     fi
@@ -176,14 +228,21 @@ bbr_enable() {
     fi
     if ! bbr_supported; then say_error 'Ядро не сообщает о поддержке BBR.'; return 1; fi
     if [[ ! $old_cc =~ ^[a-zA-Z0-9_]+$ || ! $old_qdisc =~ ^[a-zA-Z0-9_]+$ ]]; then say_error 'Текущие параметры ядра имеют неожиданный формат.'; return 1; fi
+    if [[ -n $analysis ]]; then
+        while IFS= read -r line; do say_info "$line"; done <<< "$analysis"
+        say_info 'Исходные файлы изменяться не будут.'
+        say_info "Более поздний файл $BBR_CONFIG установит bbr и fq."
+    fi
     saved_cc=$old_cc saved_qdisc=$old_qdisc
     if [[ -f $BBR_CONFIG ]]; then
         saved_cc=$(bbr_saved_value previous_cc) || return 1
         saved_qdisc=$(bbr_saved_value previous_qdisc) || return 1
     fi
     say_info 'BBR не гарантирует улучшение для любого трафика.'
+    say_info "Текущий алгоритм TCP: $old_cc; текущий qdisc: $old_qdisc."
+    say_info 'Будет применено: алгоритм TCP bbr; очередь по умолчанию fq.'
     if ! confirm_yes_no 'Включить BBR для TCP и очередь fq?'; then say_info 'Действие отменено.'; return 0; fi
-    if (( DRY_RUN )); then say_info "План: сохранить копию при необходимости, записать $BBR_CONFIG и применить два параметра ядра."; return 0; fi
+    if (( DRY_RUN )); then say_info "План: сохранить копию при необходимости, записать $BBR_CONFIG и применить два параметра ядра. Перезагрузка не выполняется."; return 0; fi
     prepare_mutation || return 1
     bbr_apply_enable "$saved_cc" "$saved_qdisc" "$old_cc" "$old_qdisc" || return 1
     bbr_status
@@ -240,14 +299,14 @@ bbr_menu() {
     local choice
     while true; do
         printf '\n════════ BBR ════════\n'; bbr_status
-        printf '1. Проверить поддержку BBR\n2. Включить BBR\n3. Проверить состояние BBR\n4. Отключить BBR\n5. Назад\nВыберите пункт: '
+        printf '1. Проверить поддержку BBR\n2. Включить BBR\n3. Проверить состояние BBR\n4. Отключить BBR\n0. Назад\nВыберите пункт: '
         IFS= read -r choice || return 0
         case "$choice" in
             1) if bbr_supported; then say_ok 'Поддержка BBR обнаружена.'; else say_warn 'Поддержка BBR не обнаружена.'; fi; pause_menu;;
             2) bbr_enable; pause_menu;;
             3) bbr_status; pause_menu;;
             4) bbr_disable; pause_menu;;
-            5) return;;
+            0) return;;
             *) say_warn 'Неизвестный пункт меню.';;
         esac
     done

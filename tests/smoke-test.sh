@@ -47,7 +47,7 @@ test_config=$(mktemp) || fail 'Не удалось создать временн
 conflict_file=$(mktemp) || fail 'Не удалось создать файл проверки sysctl.'
 fixture_root=$(mktemp -d) || fail 'Не удалось создать временный каталог sysctl.'
 readiness_dir=$(mktemp -d) || fail 'Не удалось создать временный каталог Fail2Ban.'
-trap 'rm -f -- "$test_config" "$conflict_file" "$fixture_root/run/sysctl.d/case.conf" "$fixture_root/usr/local/lib/sysctl.d/case.conf" "$readiness_dir/restarts" "$readiness_dir/jail-checks" "$readiness_dir/sleeps"; rmdir -- "$readiness_dir" "$fixture_root/run/sysctl.d" "$fixture_root/run" "$fixture_root/usr/local/lib/sysctl.d" "$fixture_root/usr/local/lib" "$fixture_root/usr/local" "$fixture_root/usr" "$fixture_root" 2>/dev/null || true' EXIT
+trap 'rm -f -- "$test_config" "$conflict_file" "$fixture_root/run/sysctl.d/10-case.conf" "$fixture_root/usr/local/lib/sysctl.d/10-case.conf" "$readiness_dir/restarts" "$readiness_dir/jail-checks" "$readiness_dir/sleeps"; rmdir -- "$readiness_dir" "$fixture_root/run/sysctl.d" "$fixture_root/run" "$fixture_root/usr/local/lib/sysctl.d" "$fixture_root/usr/local/lib" "$fixture_root/usr/local" "$fixture_root/usr" "$fixture_root" 2>/dev/null || true' EXIT
 BBR_CONFIG=$test_config
 bbr_config_content cubic fq_codel > "$BBR_CONFIG"
 bbr_file_owned || fail 'Штатный файл BBR не распознан.'
@@ -75,16 +75,16 @@ MOCK_SYSCTL_FILE=$conflict_file
 conflict_result=$(bbr_enable) || fail 'Проверка конфликта sysctl завершилась ошибкой.'
 [[ $conflict_result == *"$conflict_file"* && $conflict_result == *'cubic'* && $conflict_result == *'fq_codel'* && $conflict_result == *'Включение BBR отменено'* ]] || fail 'Конфликты sysctl не показаны.'
 mkdir -p -- "$fixture_root/run/sysctl.d" "$fixture_root/usr/local/lib/sysctl.d" || fail 'Не удалось создать тестовую структуру sysctl.'
-printf '%s\n' '-net.ipv4.tcp_congestion_control = cubic' > "$fixture_root/run/sysctl.d/case.conf"
-printf '%s\n' '-net.core.default_qdisc = fq_codel' > "$fixture_root/usr/local/lib/sysctl.d/case.conf"
-fixture_conflicts=$( (source "$ROOT_DIR/modules/bbr.sh"; bbr_sysctl_conflicts "$fixture_root") ) || fail 'Поиск конфликтов во временных каталогах завершился ошибкой.'
-[[ $fixture_conflicts == *"$fixture_root/run/sysctl.d/case.conf: net.ipv4.tcp_congestion_control = cubic"* ]] || fail 'Конфликт из /run/sysctl.d с ведущим дефисом не найден.'
-[[ $fixture_conflicts == *"$fixture_root/usr/local/lib/sysctl.d/case.conf: net.core.default_qdisc = fq_codel"* ]] || fail 'Конфликт из /usr/local/lib/sysctl.d с ведущим дефисом не найден.'
-printf '%s\n' '-net.ipv4.tcp_congestion_control' > "$fixture_root/run/sysctl.d/case.conf"
-printf '%s\n' '-net.core.default_qdisc' > "$fixture_root/usr/local/lib/sysctl.d/case.conf"
+printf '%s\n' '-net.ipv4.tcp_congestion_control = cubic' > "$fixture_root/run/sysctl.d/10-case.conf"
+printf '%s\n' '-net.core.default_qdisc = fq_codel' > "$fixture_root/usr/local/lib/sysctl.d/10-case.conf"
+fixture_overrides=$( (source "$ROOT_DIR/modules/bbr.sh"; bbr_sysctl_conflicts "$fixture_root") ) || fail 'Безопасные ранние sysctl-настройки ошибочно заблокированы.'
+[[ $fixture_overrides == *"$fixture_root/run/sysctl.d/10-case.conf = cubic"* && $fixture_overrides == *'ведущий «-»'* ]] || fail 'Ранняя настройка из /run/sysctl.d не распознана.'
+[[ $fixture_overrides == *"$fixture_root/usr/local/lib/sysctl.d/10-case.conf = fq_codel"* ]] || fail 'Ранняя настройка из /usr/local/lib/sysctl.d не распознана.'
+printf '%s\n' '-net.ipv4.tcp_congestion_control' > "$fixture_root/run/sysctl.d/10-case.conf"
+printf '%s\n' '-net.core.default_qdisc' > "$fixture_root/usr/local/lib/sysctl.d/10-case.conf"
 standalone_result=$( (source "$ROOT_DIR/modules/bbr.sh"; bbr_sysctl_conflicts "$fixture_root") ) || fail 'Строка исключения без значения вызвала ошибку.'
 [[ -z $standalone_result ]] || fail 'Строка исключения без «=» ошибочно принята за конфликт.'
-printf '%s\n' '-net.ipv4.tcp_congestion_control = cubic=неоднозначно' > "$fixture_root/run/sysctl.d/case.conf"
+printf '%s\n' '-net.ipv4.tcp_congestion_control = cubic=неоднозначно' > "$fixture_root/run/sysctl.d/10-case.conf"
 if ambiguous_result=$( (source "$ROOT_DIR/modules/bbr.sh"; bbr_sysctl_conflicts "$fixture_root") ); then
     fail 'Неоднозначное значение sysctl было принято.'
 fi
@@ -387,3 +387,5 @@ if step_diagnostic=$(run_step 'Тестовая команда apt' apt_run upgr
 
 printf 'OK: синтаксис, модули, версия, IP, SSH, Fail2Ban, sysctl, apt и режим просмотра проверены.\n'
 bash "$ROOT_DIR/tests/policy-smoke-test.sh" || fail 'Проверки политик Fail2Ban завершились ошибкой.'
+bash "$ROOT_DIR/tests/bbr-smoke-test.sh" || fail 'Проверки BBR завершились ошибкой.'
+bash "$ROOT_DIR/tests/menu-smoke-test.sh" || fail 'Проверки навигации меню завершились ошибкой.'

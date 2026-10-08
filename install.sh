@@ -29,8 +29,10 @@ show_menu() {
     printf '╚══════════════════════════════════════════════╝\n'
     printf 'Версия: %s\nОС: %s\nIPv4: %s\nВремя работы: %s\n' "$TOOL_VERSION" "$(os_field PRETTY_NAME)" "$(first_public_ip 4)" "$(uptime_ru)"
     if (( DRY_RUN )); then say_warn 'Режим просмотра: изменения не выполняются.'; fi
-    printf '\n1. Аудит сервера\n2. Обновление системы\n3. Fail2Ban / защита SSH\n4. BBR\n5. Информация о сервере\n6. История действий\n7. Выход\nВыберите пункт: '
+    printf '\n1. Аудит сервера\n2. Обновление системы\n3. Fail2Ban / защита SSH\n4. BBR\n5. Информация о сервере\n6. История действий\n0. Выход\nВыберите пункт: '
 }
+
+toolkit_is_root() { (( EUID == 0 )); }
 
 main() {
     local choice
@@ -41,7 +43,7 @@ main() {
         *) say_error 'Допустимый аргумент: --dry-run или --version.'; return 2;;
     esac
     TOOL_VERSION=$(read_version) || { say_error 'Файл VERSION отсутствует или имеет неверный формат.'; return 1; }
-    if (( EUID != 0 )); then say_error 'Запустите инструмент от root через sudo.'; return 1; fi
+    if ! toolkit_is_root; then say_error 'Запустите инструмент от root через sudo.'; return 1; fi
     if ! check_platform; then say_error 'Поддерживаются только Ubuntu 22.04 LTS и 24.04 LTS.'; return 1; fi
     while true; do
         show_menu
@@ -53,7 +55,7 @@ main() {
             4) bbr_menu;;
             5) system_info; pause_menu;;
             6) show_file_tail "$TOOL_LOG" 50; pause_menu;;
-            7) say_info 'Работа завершена.'; return 0;;
+            0) say_info 'Работа завершена.'; return 0;;
             *) say_warn 'Неизвестный пункт меню.';;
         esac
     done

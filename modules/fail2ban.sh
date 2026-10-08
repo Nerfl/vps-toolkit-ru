@@ -373,7 +373,7 @@ fail2ban_menu() {
     local choice
     while true; do
         printf '\n════════ FAIL2BAN / ЗАЩИТА SSH ════════\n'; fail2ban_status
-        printf '1. Установить и настроить Fail2Ban\n2. Проверить состояние\n3. Показать заблокированные IP\n4. Показать TOP атакующих IP\n5. Разблокировать IP\n6. Показать журнал Fail2Ban\n7. Политика блокировок\n8. Назад\nВыберите пункт: '
+        printf '1. Установить и настроить Fail2Ban\n2. Проверить состояние\n3. Показать заблокированные IP\n4. Показать TOP атакующих IP\n5. Разблокировать IP\n6. Показать журнал Fail2Ban\n7. Политика блокировок\n0. Назад\nВыберите пункт: '
         IFS= read -r choice || return 0
         case "$choice" in
             1) fail2ban_install_configure; pause_menu;;
@@ -383,7 +383,7 @@ fail2ban_menu() {
             5) fail2ban_unban; pause_menu;;
             6) fail2ban_log; pause_menu;;
             7) fail2ban_policy_menu;;
-            8) return;;
+            0) return;;
             *) say_warn 'Неизвестный пункт меню.';;
         esac
     done

@@ -314,6 +314,6 @@ repeat_output=$(fail2ban_policy_select adaptive) || fail 'Повторное п�
 
 menu_output=$(printf '0\n' | fail2ban_policy_menu) || fail 'Подменю политики не завершилось.'
 [[ $menu_output == *'2. Адаптивная [РЕКОМЕНДУЕТСЯ]'* && $menu_output == *'0. Назад'* ]] || fail 'Подменю политики неполное.'
-main_menu_output=$(printf '8\n' | fail2ban_menu) || fail 'Меню Fail2Ban не вернулось назад.'
-[[ $main_menu_output == *'7. Политика блокировок'* && $main_menu_output == *'8. Назад'* ]] || fail 'Пункты меню Fail2Ban не обновлены.'
+main_menu_output=$(printf '0\n' | fail2ban_menu) || fail 'Меню Fail2Ban не вернулось назад.'
+[[ $main_menu_output == *'7. Политика блокировок'* && $main_menu_output == *'0. Назад'* ]] || fail 'Пункты меню Fail2Ban не обновлены.'
 printf 'OK: политики Fail2Ban, переходы, чужие настройки, откат, режим просмотра и идемпотентность проверены.\n'
