@@ -386,3 +386,4 @@ if step_diagnostic=$(run_step 'Тестовая команда apt' apt_run upgr
 ) || fail 'Проверки ожидания готовности Fail2Ban завершились ошибкой.'
 
 printf 'OK: синтаксис, модули, версия, IP, SSH, Fail2Ban, sysctl, apt и режим просмотра проверены.\n'
+bash "$ROOT_DIR/tests/policy-smoke-test.sh" || fail 'Проверки политик Fail2Ban завершились ошибкой.'

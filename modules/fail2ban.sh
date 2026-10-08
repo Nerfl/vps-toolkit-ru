@@ -9,6 +9,7 @@ fail2ban_status() {
     if has_cmd fail2ban-client && fail2ban-client status sshd >/dev/null 2>&1; then
         printf 'SSH jail активен: Да\n'
     else printf 'SSH jail активен: Нет или недоступен\n'; fi
+    fail2ban_policy_status
 }
 
 fail2ban_existing_custom() {
@@ -26,7 +27,7 @@ fail2ban_existing_custom() {
 }
 
 fail2ban_desired_config() {
-    printf '%s\n' '# Управляется VPS Toolkit RU. Не редактируйте вручную.' '[sshd]' 'enabled = true' 'backend = systemd' 'port = 22' 'maxretry = 5' 'findtime = 10m' 'bantime = 1h'
+    printf '%s\n' '# Управляется VPS Toolkit RU. Не редактируйте вручную.' '[sshd]' 'enabled = true' 'backend = systemd' 'port = 22' 'maxretry = 5' 'findtime = 10m' 'bantime = 1h' 'bantime.increment = false'
 }
 
 fail2ban_legacy_config() {
@@ -43,7 +44,9 @@ fail2ban_config_managed() {
     [[ -f $F2B_CONFIG ]] || return 1
     diff -q "$F2B_CONFIG" <(fail2ban_desired_config) >/dev/null 2>&1 \
         || diff -q "$F2B_CONFIG" <(fail2ban_legacy_config) >/dev/null 2>&1 \
-        || diff -q "$F2B_CONFIG" <(fail2ban_previous_config) >/dev/null 2>&1
+        || diff -q "$F2B_CONFIG" <(fail2ban_previous_config) >/dev/null 2>&1 \
+        || diff -q "$F2B_CONFIG" <(fail2ban_policy_jail_config adaptive) >/dev/null 2>&1 \
+        || diff -q "$F2B_CONFIG" <(fail2ban_policy_jail_config strict) >/dev/null 2>&1
 }
 
 fail2ban_socket_listen_ports() {
@@ -253,6 +256,7 @@ fail2ban_apply_config() (
 )
 
 fail2ban_install_configure() {
+    local current_policy
     printf '\nНастройка jail sshd: 5 попыток за 10 минут, блокировка на 1 час.\n'
     say_warn 'Собственный IP может быть временно заблокирован после повторных неудачных входов. Убедитесь, что есть действующий SSH-сеанс.'
     if ! fail2ban_ssh_port_safe; then
@@ -266,6 +270,14 @@ fail2ban_install_configure() {
     fi
     if ! fail2ban_config_managed; then
         say_warn 'Файл toolkit изменён вручную или является ссылкой; автоматическая перезапись отменена.'
+        return 0
+    fi
+    if [[ -f $F2B_CONFIG ]] && {
+        diff -q "$F2B_CONFIG" <(fail2ban_policy_jail_config adaptive) >/dev/null 2>&1 \
+            || diff -q "$F2B_CONFIG" <(fail2ban_policy_jail_config strict) >/dev/null 2>&1;
+    }; then
+        current_policy=$(fail2ban_policy_detect)
+        say_info "Действующая политика $(fail2ban_policy_label "$current_policy") сохранена. Для изменения используйте меню политик."
         return 0
     fi
     if package_installed fail2ban && [[ -f $F2B_CONFIG ]] \
@@ -351,7 +363,7 @@ fail2ban_menu() {
     local choice
     while true; do
         printf '\n════════ FAIL2BAN / ЗАЩИТА SSH ════════\n'; fail2ban_status
-        printf '1. Установить и настроить Fail2Ban\n2. Проверить состояние\n3. Показать заблокированные IP\n4. Показать TOP атакующих IP\n5. Разблокировать IP\n6. Показать журнал Fail2Ban\n7. Назад\nВыберите пункт: '
+        printf '1. Установить и настроить Fail2Ban\n2. Проверить состояние\n3. Показать заблокированные IP\n4. Показать TOP атакующих IP\n5. Разблокировать IP\n6. Показать журнал Fail2Ban\n7. Политика блокировок\n8. Назад\nВыберите пункт: '
         IFS= read -r choice || return 0
         case "$choice" in
             1) fail2ban_install_configure; pause_menu;;
@@ -360,7 +372,8 @@ fail2ban_menu() {
             4) fail2ban_top_attackers; pause_menu;;
             5) fail2ban_unban; pause_menu;;
             6) fail2ban_log; pause_menu;;
-            7) return;;
+            7) fail2ban_policy_menu;;
+            8) return;;
             *) say_warn 'Неизвестный пункт меню.';;
         esac
     done
