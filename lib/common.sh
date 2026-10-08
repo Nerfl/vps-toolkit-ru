@@ -135,6 +135,54 @@ package_installed() { has_cmd dpkg-query && [[ $(dpkg-query -W -f='${Status}' "$
 
 yes_no() { if "$@"; then printf 'Да\n'; else printf 'Нет\n'; fi; }
 
+dpkg_health() {
+    local mode=${1:-preflight} output result
+    if ! has_cmd dpkg; then
+        say_critical 'Команда dpkg недоступна; состояние пакетной системы не проверено.'
+        return 1
+    fi
+    if output=$(LC_ALL=C dpkg --audit 2>&1); then result=0; else result=$?; fi
+    if (( result == 0 )) && [[ ! $output =~ [^[:space:]] ]]; then
+        [[ $mode == audit ]] && say_ok 'Состояние dpkg: нормально'
+        return 0
+    fi
+    if (( result != 0 )); then
+        say_critical "Проверка dpkg --audit завершилась с кодом $result; состояние пакетной системы неизвестно."
+    elif [[ $mode == audit ]]; then
+        say_critical 'Обнаружены незавершённые операции dpkg.'
+    else
+        say_critical 'Пакетная система dpkg находится в незавершённом состоянии.'
+    fi
+    if [[ $output =~ [^[:space:]] ]]; then
+        printf 'Краткий вывод dpkg --audit:\n'
+        printf '%s\n' "$output" | awk 'NF {if (++count <= 12) print; else omitted=1} END {if (omitted) print "..."}'
+    fi
+    say_info 'Сначала необходимо завершить или исправить состояние dpkg. Toolkit не выполняет автоматический ремонт пакетной системы.'
+    return 1
+}
+
+apt_lock_preflight() {
+    local tool='' file owners
+    local -a files
+    if (( $# )); then files=("$@"); else
+        files=(/var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/lib/apt/lists/lock /var/cache/apt/archives/lock)
+    fi
+    if has_cmd fuser; then tool=fuser
+    elif has_cmd lsof; then tool=lsof
+    else say_warn 'fuser и lsof недоступны; наличие владельца lock проверит сам apt-get.'; return 0; fi
+    for file in "${files[@]}"; do
+        [[ -e $file ]] || continue
+        if [[ $tool == fuser ]]; then owners=$(fuser "$file" 2>/dev/null) || owners=''
+        else owners=$(lsof -t -- "$file" 2>/dev/null) || owners=''; fi
+        if [[ -n $owners ]]; then
+            owners=${owners//$'\n'/ }
+            say_warn "Файл блокировки $file удерживается процессом PID $owners. Дождитесь его завершения; файл не удаляйте."
+            return 1
+        fi
+    done
+    return 0
+}
+
 uptime_ru() {
     local seconds='' days hours minutes
     if [[ ! -r /proc/uptime ]]; then printf 'Недоступно\n'; return; fi
@@ -176,11 +224,35 @@ apt_diagnostics() {
     '
 }
 
+apt_show_failure() {
+    local result=$1 output=$2
+    say_error "apt-get завершился с кодом $result."
+    printf 'Последние строки вывода apt (адреса источников скрыты):\n' >&2
+    printf '%s\n' "$output" | awk '
+        NF {
+            gsub(/https?:\/\/[^[:space:]]+/, "[адрес источника скрыт]")
+            lines[(count % 20) + 1]=$0
+            count++
+        }
+        END {
+            if (!count) {print "Вывод apt отсутствует."; exit}
+            start=count > 20 ? count-19 : 1
+            for (i=start; i<=count; i++) print lines[((i-1) % 20) + 1]
+        }
+    ' >&2
+}
+
 apt_run() {
-    local result
+    local result output
     local -a options=(-y -o DPkg::Lock::Timeout=0 -o Dpkg::Options::=--force-confold)
+    if (( DRY_RUN )); then say_info 'Режим просмотра: apt-get не запускается.'; return 0; fi
+    dpkg_health preflight || return 1
+    apt_lock_preflight || return 1
     if [[ ${1:-} == update ]]; then options+=(-o APT::Update::Error-Mode=any); fi
-    DEBIAN_FRONTEND=noninteractive LC_ALL=C apt-get "${options[@]}" "$@" 2>&1 | apt_diagnostics
-    result=${PIPESTATUS[0]}
+    if output=$(DEBIAN_FRONTEND=noninteractive LC_ALL=C apt-get "${options[@]}" "$@" 2>&1); then
+        apt_diagnostics <<< "$output"
+        return 0
+    else result=$?; fi
+    apt_show_failure "$result" "$output"
     return "$result"
 }

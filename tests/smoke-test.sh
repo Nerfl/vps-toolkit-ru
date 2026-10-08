@@ -46,7 +46,8 @@ fi
 test_config=$(mktemp) || fail 'Не удалось создать временный файл теста.'
 conflict_file=$(mktemp) || fail 'Не удалось создать файл проверки sysctl.'
 fixture_root=$(mktemp -d) || fail 'Не удалось создать временный каталог sysctl.'
-trap 'rm -f -- "$test_config" "$conflict_file" "$fixture_root/run/sysctl.d/case.conf" "$fixture_root/usr/local/lib/sysctl.d/case.conf"; rmdir -- "$fixture_root/run/sysctl.d" "$fixture_root/run" "$fixture_root/usr/local/lib/sysctl.d" "$fixture_root/usr/local/lib" "$fixture_root/usr/local" "$fixture_root/usr" "$fixture_root" 2>/dev/null || true' EXIT
+readiness_dir=$(mktemp -d) || fail 'Не удалось создать временный каталог Fail2Ban.'
+trap 'rm -f -- "$test_config" "$conflict_file" "$fixture_root/run/sysctl.d/case.conf" "$fixture_root/usr/local/lib/sysctl.d/case.conf" "$readiness_dir/restarts" "$readiness_dir/jail-checks" "$readiness_dir/sleeps"; rmdir -- "$readiness_dir" "$fixture_root/run/sysctl.d" "$fixture_root/run" "$fixture_root/usr/local/lib/sysctl.d" "$fixture_root/usr/local/lib" "$fixture_root/usr/local" "$fixture_root/usr" "$fixture_root" 2>/dev/null || true' EXIT
 BBR_CONFIG=$test_config
 bbr_config_content cubic fq_codel > "$BBR_CONFIG"
 bbr_file_owned || fail 'Штатный файл BBR не распознан.'
@@ -226,6 +227,9 @@ apt_plan=$(apt_upgrade_safe) || fail 'Просмотр обновления за
 [[ $apt_plan == *'План:'* ]] || fail 'План обновления не показан.'
 refresh_plan=$(apt_refresh) || fail 'Просмотр apt update завершился ошибкой.'
 [[ $refresh_plan == *'План:'* ]] || fail 'План apt update не показан.'
+dpkg() { fail 'В режиме просмотра вызван dpkg.'; }
+dry_apt=$(apt_run install fail2ban) || fail 'Режим просмотра apt завершился ошибкой.'
+[[ $dry_apt == *'apt-get не запускается'* ]] || fail 'Режим просмотра не сообщил об отмене apt-get.'
 update_menu </dev/null >/dev/null || fail 'EOF в меню обновлений обработан неверно.'
 invalid_menu=$(printf 'неверно\n4\n' | update_menu) || fail 'Неправильный ввод в меню обработан неверно.'
 [[ $invalid_menu == *'Неизвестный пункт меню'* ]] || fail 'Меню не предупредило о неправильном вводе.'
@@ -245,24 +249,140 @@ modified_file=$(bbr_disable) || fail 'Проверка изменённого ф
 [[ $modified_file == *'удаление отменено'* ]] || fail 'Изменённый файл BBR не был защищён.'
 
 DRY_RUN=0
+MOCK_DPKG_AUDIT=''
+dpkg() {
+    [[ ${1:-} == --audit ]] || fail 'В тесте dpkg вызван с неожиданным аргументом.'
+    printf '%s' "$MOCK_DPKG_AUDIT"
+}
+health_output=$(dpkg_health audit) || fail 'Пустой dpkg --audit ошибочно заблокировал операции apt.'
+[[ $health_output == *'Состояние dpkg: нормально'* ]] || fail 'Аудит не показал нормальное состояние dpkg.'
+for fixture in \
+    'The following packages have been unpacked but not yet configured: fail2ban' \
+    'The following packages are only half configured: fail2ban' \
+    'The following packages have been triggered, but the trigger processing has not yet been done: libc-bin'; do
+    MOCK_DPKG_AUDIT=$fixture
+    if health_output=$(dpkg_health preflight); then fail 'Незавершённое состояние dpkg пропущено.'; fi
+    [[ $health_output == *'[CRITICAL] Пакетная система dpkg находится в незавершённом состоянии.'* && $health_output == *"$fixture"* ]] || fail 'Причина блокировки dpkg не показана.'
+    if health_output=$(dpkg_health audit); then fail 'Аудит пропустил незавершённое состояние dpkg.'; fi
+    [[ $health_output == *'[CRITICAL] Обнаружены незавершённые операции dpkg.'* ]] || fail 'Аудит не отметил критическое состояние dpkg.'
+done
+fuser() { [[ ${MOCK_LOCK_OWNER:-} == yes ]] && printf '1234\n' || return 1; }
+MOCK_LOCK_OWNER=yes
+if lock_output=$(apt_lock_preflight "$test_config"); then fail 'Занятый lock-файл не обнаружен.'; fi
+[[ $lock_output == *'PID 1234'* ]] || fail 'Владелец lock-файла не показан.'
+MOCK_LOCK_OWNER=no
+apt_lock_preflight "$test_config" >/dev/null || fail 'Свободный lock-файл ошибочно заблокирован.'
+apt_lock_preflight() { return 0; }
 apt-get() {
-    if [[ ${1:-} == -s ]]; then printf 'Inst package-a [1] (2 Ubuntu:24.04)\nInst package-b [1] (2 Ubuntu:24.04)\n'; return 0; fi
-    printf 'E: Could not get lock /var/lib/dpkg/lock\n'
-    return 42
+    if [[ ${1:-} == -s ]]; then
+        if [[ ${MOCK_APT_SIM_FAIL:-} == yes ]]; then printf 'E: План обновления недоступен\n'; return 100; fi
+        printf 'Inst package-a [1] (2 Ubuntu:24.04)\nInst package-b [1] (2 Ubuntu:24.04)\n'
+        return 0
+    fi
+    printf 'dpkg: error processing package fail2ban (--configure):\nE: Sub-process /usr/bin/dpkg returned an error code (1)\n'
+    return 100
 }
 apt_preview_upgrade >/dev/null || fail 'Симуляция apt с подменённой командой завершилась ошибкой.'
 [[ $APT_PREVIEW_COUNT == 2 ]] || fail 'Число пакетов в плане обновления неверно.'
-set +e
-apt_diagnostic=$(apt_run upgrade 2>&1)
-apt_result=$?
-set -e
-[[ $apt_result == 42 && $apt_diagnostic == *'apt/dpkg занят'* ]] || fail 'Код ошибки apt или диагностика блокировки потеряны.'
+MOCK_APT_SIM_FAIL=yes
+if preview_diagnostic=$(apt_preview_upgrade 2>&1); then fail 'Ошибка симуляции apt ошибочно принята за успех.'; else preview_result=$?; fi
+[[ $preview_result == 100 && $preview_diagnostic == *'кодом 100'* && $preview_diagnostic == *'План обновления недоступен'* ]] || fail 'Диагностика ошибки симуляции apt потеряна.'
+MOCK_APT_SIM_FAIL=no
+for fixture in \
+    'The following packages have been unpacked but not yet configured: fail2ban' \
+    'The following packages are only half configured: fail2ban' \
+    'The following packages have been triggered, but the trigger processing has not yet been done: libc-bin'; do
+    MOCK_DPKG_AUDIT=$fixture
+    if apt_diagnostic=$(apt_run install fail2ban 2>&1); then fail 'apt был разрешён при незавершённом dpkg.'; fi
+    [[ $apt_diagnostic == *'[CRITICAL] Пакетная система dpkg находится в незавершённом состоянии.'* && $apt_diagnostic != *'apt-get завершился'* ]] || fail 'apt не был остановлен до запуска.'
+done
+MOCK_DPKG_AUDIT=''
+if apt_diagnostic=$(apt_run upgrade 2>&1); then fail 'Ошибка apt ошибочно принята за успех.'; else apt_result=$?; fi
+[[ $apt_result == 100 && $apt_diagnostic == *'кодом 100'* && $apt_diagnostic == *'dpkg: error processing package'* && $apt_diagnostic == *'E: Sub-process'* ]] || fail 'Код ошибки apt или исходная диагностика потеряны.'
 prepare_mutation() { return 0; }
 log_action() { return 0; }
-set +e
-step_diagnostic=$(run_step 'Тестовая команда apt' apt_run upgrade 2>&1)
-step_result=$?
-set -e
-[[ $step_result == 42 && $step_diagnostic == *'Действие не выполнено'* ]] || fail 'Код ошибки apt потерян при выполнении шага.'
+if step_diagnostic=$(run_step 'Тестовая команда apt' apt_run upgrade 2>&1); then fail 'Ошибка шага apt ошибочно принята за успех.'; else step_result=$?; fi
+[[ $step_result == 100 && $step_diagnostic == *'Действие не выполнено'* ]] || fail 'Код ошибки apt потерян при выполнении шага.'
+
+(
+    F2B_CONFIG=$test_config
+    fail2ban_desired_config > "$F2B_CONFIG"
+    package_installed() { return 0; }
+    backup_file() { fail 'Тест Fail2Ban попытался создать системную копию.'; }
+    mkdir() { [[ "$*" == '-p -m 0755 /etc/fail2ban/jail.d' ]] || fail 'Тест Fail2Ban попытался создать неожиданный каталог.'; }
+    service_active() { [[ ${1:-} == fail2ban ]]; }
+    journalctl() { printf 'Server ready\n'; }
+    sleep() {
+        local count
+        count=$(< "$readiness_dir/sleeps")
+        printf '%s\n' "$((count + 1))" > "$readiness_dir/sleeps"
+    }
+    systemctl() {
+        local count
+        [[ ${2:-} == fail2ban ]] || fail 'Неожиданный сервис в тесте Fail2Ban.'
+        count=$(< "$readiness_dir/restarts")
+        case ${1:-} in
+            restart) printf '%s\n' "$((count + 1))" > "$readiness_dir/restarts";;
+            is-active)
+                if [[ $MOCK_F2B_CASE == failed && $count == 1 ]]; then printf 'failed\n'; return 3; fi
+                printf 'active\n';;
+            *) fail 'Неожиданный вызов systemctl в тесте Fail2Ban.';;
+        esac
+    }
+    fail2ban-client() {
+        local count checks
+        case ${1:-} in
+            -t) printf "'allowipv6' not defined in 'Definition'. Using default one: 'auto'\n" >&2;;
+            ping) printf 'Server replied: pong\n';;
+            status)
+                [[ ${2:-} == sshd ]] || fail 'Проверен неожиданный jail.'
+                count=$(< "$readiness_dir/restarts")
+                if (( count == 0 || count == 2 )); then printf 'Status for the jail: sshd\n'; return 0; fi
+                checks=$(< "$readiness_dir/jail-checks")
+                checks=$((checks + 1))
+                printf '%s\n' "$checks" > "$readiness_dir/jail-checks"
+                case $MOCK_F2B_CASE in
+                    delayed|rollback_delay) (( checks <= 2 )) && return 1;;
+                    timeout) return 1;;
+                    failed) return 1;;
+                esac
+                printf 'Status for the jail: sshd\n';;
+            get)
+                case ${3:-} in maxretry) printf '5\n';; findtime) printf '600\n';; bantime) printf '3600\n';; esac;;
+            *) fail 'Неожиданный вызов fail2ban-client в тесте.';;
+        esac
+    }
+    reset_readiness_case() {
+        MOCK_F2B_CASE=$1
+        printf '0\n' > "$readiness_dir/restarts"
+        printf '0\n' > "$readiness_dir/jail-checks"
+        printf '0\n' > "$readiness_dir/sleeps"
+    }
+
+    reset_readiness_case immediate
+    ready_output=$(fail2ban_apply_config) || fail 'Готовый сразу Fail2Ban ошибочно отклонён.'
+    [[ $ready_output == *'Сервис Fail2Ban запущен'* && $ready_output == *'jail sshd активен'* && $(< "$readiness_dir/sleeps") == 0 ]] || fail 'Немедленная готовность Fail2Ban не подтверждена.'
+
+    reset_readiness_case delayed
+    ready_output=$(fail2ban_apply_config) || fail 'Постепенное появление jail ошибочно отклонено.'
+    [[ $(< "$readiness_dir/jail-checks") == 3 && $(< "$readiness_dir/sleeps") == 2 && $(< "$readiness_dir/restarts") == 1 && $ready_output != *'Откат:'* ]] || fail 'Ожидание jail или отсутствие преждевременного отката не подтверждено.'
+
+    reset_readiness_case failed
+    if ready_output=$(fail2ban_apply_config 2>&1); then fail 'Упавший сервис ошибочно принят за готовый.'; fi
+    [[ $ready_output == *'Сервис Fail2Ban остановился или завершился с ошибкой'* && $ready_output == *'Состояние systemd-сервиса Fail2Ban: failed'* && $ready_output == *'Прежняя конфигурация и состояние Fail2Ban восстановлены'* && $(< "$readiness_dir/restarts") == 2 && $(< "$readiness_dir/sleeps") == 0 ]] || fail 'Падение сервиса не вызвало немедленную ошибку и откат.'
+
+    reset_readiness_case timeout
+    if ready_output=$(fail2ban_apply_config 2>&1); then fail 'Отсутствующий jail ошибочно принят за готовый.'; fi
+    [[ $F2B_READY_TIMEOUT_SECONDS == 20 && $ready_output == *'Истекло время ожидания'* && $ready_output == *'Последние события Fail2Ban:'* && $ready_output == *'Прежняя конфигурация и состояние Fail2Ban восстановлены'* && $(< "$readiness_dir/restarts") == 2 && $(< "$readiness_dir/sleeps") == 20 ]] || fail 'Таймаут jail не вызвал диагностику и откат через 20 секунд.'
+
+    reset_readiness_case rollback_delay
+    F2B_CHANGED=0 F2B_WAS_ACTIVE=1 F2B_JAIL_WAS_ACTIVE=1
+    rollback_output=$(fail2ban_restore_config) || fail 'Откат не дождался восстановления jail.'
+    [[ $(< "$readiness_dir/jail-checks") == 3 && $(< "$readiness_dir/sleeps") == 2 && $rollback_output == *'jail sshd активен'* ]] || fail 'Откат не проверил готовность через повторные попытки.'
+
+    reset_readiness_case immediate
+    warning_output=$(fail2ban_apply_config) || fail 'Предупреждение allowipv6 ошибочно признано ошибкой.'
+    [[ $warning_output == *'Конфигурация Fail2Ban прошла проверку'* && $warning_output == *'jail sshd активен'* ]] || fail 'Корректная конфигурация с предупреждением allowipv6 отклонена.'
+) || fail 'Проверки ожидания готовности Fail2Ban завершились ошибкой.'
 
 printf 'OK: синтаксис, модули, версия, IP, SSH, Fail2Ban, sysctl, apt и режим просмотра проверены.\n'

@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 
 F2B_CONFIG=/etc/fail2ban/jail.d/vps-toolkit-sshd.local
+F2B_READY_TIMEOUT_SECONDS=20
 
 fail2ban_status() {
     printf 'Установлен: %s\n' "$(yes_no package_installed fail2ban)"
@@ -134,12 +135,58 @@ fail2ban_restore_config() {
         fi
     fi
     if (( F2B_WAS_ACTIVE )); then
-        systemctl restart fail2ban >/dev/null 2>&1 && service_active fail2ban \
-            && { (( ! F2B_JAIL_WAS_ACTIVE )) || fail2ban-client status sshd >/dev/null 2>&1; }
+        say_info 'Откат: перезапуск Fail2Ban...'
+        if ! systemctl restart fail2ban >/dev/null 2>&1; then
+            fail2ban_readiness_diagnostics 'Перезапуск Fail2Ban при откате завершился ошибкой.'
+            return 1
+        fi
+        say_info 'Откат: ожидание готовности Fail2Ban...'
+        fail2ban_wait_ready "$F2B_JAIL_WAS_ACTIVE"
     else
         if service_active fail2ban; then systemctl stop fail2ban >/dev/null 2>&1 && ! service_active fail2ban
         else return 0; fi
     fi
+}
+
+fail2ban_readiness_diagnostics() {
+    local reason=$1 state ping_output ping_result jail_output jail_result journal
+    say_error "$reason"
+    state=$(systemctl is-active fail2ban 2>/dev/null) || true
+    printf 'Состояние systemd-сервиса Fail2Ban: %s\n' "${state:-недоступно}"
+    if ping_output=$(fail2ban-client ping 2>&1); then ping_result=0; else ping_result=$?; fi
+    printf 'Ответ сервера или сокета Fail2Ban (код %s): %s\n' "$ping_result" "${ping_output:-нет ответа}"
+    if jail_output=$(fail2ban-client status sshd 2>&1); then jail_result=0; else jail_result=$?; fi
+    printf 'Проверка jail sshd (код %s):\n' "$jail_result"
+    if [[ -n $jail_output ]]; then printf '%s\n' "$jail_output" | awk 'NR <= 4'
+    else printf 'Нет ответа.\n'; fi
+    if has_cmd journalctl; then
+        journal=$(journalctl -u fail2ban.service -n 8 --no-pager -o cat 2>/dev/null) || journal=''
+        if [[ -n $journal ]]; then printf 'Последние события Fail2Ban:\n%s\n' "$journal"
+        else say_info 'Последние события Fail2Ban недоступны.'; fi
+    else say_info 'Команда journalctl недоступна.'; fi
+}
+
+fail2ban_wait_ready() {
+    local require_jail=${1:-1} attempt state
+    for (( attempt=0; attempt<=F2B_READY_TIMEOUT_SECONDS; attempt++ )); do
+        state=$(systemctl is-active fail2ban 2>/dev/null) || true
+        case "$state" in
+            failed|inactive)
+                fail2ban_readiness_diagnostics 'Сервис Fail2Ban остановился или завершился с ошибкой; ожидание прекращено.'
+                return 1;;
+            active)
+                if fail2ban-client ping >/dev/null 2>&1; then
+                    if (( ! require_jail )) || fail2ban-client status sshd >/dev/null 2>&1; then
+                        say_ok 'Сервис Fail2Ban запущен.'
+                        if (( require_jail )); then say_ok 'jail sshd активен.'; fi
+                        return 0
+                    fi
+                fi;;
+        esac
+        if (( attempt < F2B_READY_TIMEOUT_SECONDS )); then sleep 1 || return 1; fi
+    done
+    fail2ban_readiness_diagnostics 'Истекло время ожидания готовности Fail2Ban или jail sshd.'
+    return 1
 }
 
 fail2ban_transaction_exit() {
@@ -177,6 +224,7 @@ fail2ban_apply_config() (
         package_installed fail2ban || { say_error 'Пакет Fail2Ban не обнаружен после установки.'; return 1; }
         log_action INFO 'Установлен Fail2Ban' || return 1
     fi
+    say_ok 'Пакет Fail2Ban установлен.'
     require_commands fail2ban-client || return 1
     mkdir -p -m 0755 /etc/fail2ban/jail.d 2>/dev/null || { say_error 'Не удалось подготовить каталог Fail2Ban.'; return 1; }
     if [[ -f $F2B_CONFIG ]] && diff -q "$F2B_CONFIG" <(fail2ban_desired_config) >/dev/null 2>&1; then needs_write=0; fi
@@ -190,11 +238,15 @@ fail2ban_apply_config() (
         F2B_TMP=''
     fi
     if ! fail2ban-client -t >/dev/null 2>&1; then say_error 'Проверка конфигурации Fail2Ban не пройдена.'; return 1; fi
+    say_ok 'Конфигурация Fail2Ban прошла проверку.'
     F2B_SERVICE_TOUCHED=1
-    if ! systemctl restart fail2ban >/dev/null 2>&1 || ! service_active fail2ban || ! fail2ban-client status sshd >/dev/null 2>&1; then
-        say_error 'Fail2Ban или SSH jail не запустился.'
+    say_info 'Перезапуск Fail2Ban...'
+    if ! systemctl restart fail2ban >/dev/null 2>&1; then
+        fail2ban_readiness_diagnostics 'Перезапуск Fail2Ban завершился ошибкой.'
         return 1
     fi
+    say_info 'Ожидание готовности Fail2Ban...'
+    fail2ban_wait_ready 1 || return 1
     fail2ban_effective_settings || return 1
     log_action INFO 'Настроен и проверен jail sshd Fail2Ban' || return 1
     say_ok 'Fail2Ban настроен, сервис и SSH jail активны.'

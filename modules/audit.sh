@@ -101,6 +101,7 @@ audit_server() {
         else say_warn 'Не удалось получить количество контейнеров.'; fi
     else say_info 'Docker не установлен.'; fi
     printf '\nИтог:\n'
+    dpkg_health audit || true
     if service_active ssh; then say_ok 'SSH запущен.'; else say_critical 'SSH не запущен или его состояние неизвестно.'; fi
     if package_installed fail2ban; then say_ok 'Fail2Ban установлен.'; else say_critical 'Fail2Ban не установлен.'; fi
     if [[ $root_setting == yes && $pass_setting == yes ]]; then say_warn 'Разрешён вход root по паролю; оцените необходимость этого режима.'; fi

@@ -29,7 +29,7 @@ apt_preview_upgrade() {
     else
         result=$?
         say_error 'Не удалось подготовить план обновления пакетов. apt-get upgrade отменён.'
-        apt_diagnostics <<< "$output" >&2
+        apt_show_failure "$result" "$output"
         return "$result"
     fi
     packages=$(awk '$1 == "Inst" {print $2}' <<< "$output")
