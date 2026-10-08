@@ -38,6 +38,15 @@ fail2ban_previous_config() {
     printf '%s\n' '# Управляется VPS Toolkit RU. Не редактируйте вручную.' '[sshd]' 'enabled = true' 'backend = systemd' 'maxretry = 5' 'findtime = 10m' 'bantime = 1h'
 }
 
+fail2ban_pre_policy_config() {
+    printf '%s\n' '# Управляется VPS Toolkit RU. Не редактируйте вручную.' '[sshd]' 'enabled = true' 'backend = systemd' 'port = 22' 'maxretry = 5' 'findtime = 10m' 'bantime = 1h'
+}
+
+fail2ban_pre_policy_managed() {
+    [[ -f $F2B_CONFIG && ! -L $F2B_CONFIG ]] \
+        && diff -q "$F2B_CONFIG" <(fail2ban_pre_policy_config) >/dev/null 2>&1
+}
+
 fail2ban_config_managed() {
     [[ ! -L $F2B_CONFIG ]] || return 1
     [[ ! -e $F2B_CONFIG ]] && return 0
@@ -45,6 +54,7 @@ fail2ban_config_managed() {
     diff -q "$F2B_CONFIG" <(fail2ban_desired_config) >/dev/null 2>&1 \
         || diff -q "$F2B_CONFIG" <(fail2ban_legacy_config) >/dev/null 2>&1 \
         || diff -q "$F2B_CONFIG" <(fail2ban_previous_config) >/dev/null 2>&1 \
+        || fail2ban_pre_policy_managed \
         || diff -q "$F2B_CONFIG" <(fail2ban_policy_jail_config adaptive) >/dev/null 2>&1 \
         || diff -q "$F2B_CONFIG" <(fail2ban_policy_jail_config strict) >/dev/null 2>&1
 }

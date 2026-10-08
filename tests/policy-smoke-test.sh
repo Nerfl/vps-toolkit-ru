@@ -52,7 +52,8 @@ fail2ban-client() {
         -t) [[ ${MOCK_FAILURE:-} != config ]];;
         -d) fail 'Дамп конфигурации не должен подтверждать runtime-политику.';;
         ping) printf 'Server replied: pong\n';;
-        status) [[ ${2:-} == sshd ]] || fail 'Неожиданный jail в тесте политики.';;
+        status) [[ ${2:-} == sshd ]] || fail 'Неожиданный jail в тесте политики.'
+            [[ ${MOCK_JAIL_ACTIVE:-1} == 1 ]];;
         get)
             if [[ ${2:-} == dbpurgeage ]]; then
                 if [[ -n ${MOCK_DBPURGE_OUTPUT:-} ]]; then printf '%s\n' "$MOCK_DBPURGE_OUTPUT"; return; fi
@@ -67,11 +68,12 @@ fail2ban-client() {
                 else printf 'Current database file is:\n`- /var/lib/fail2ban/fail2ban.sqlite3\n'; fi
             else
                 [[ ${2:-} == sshd ]] || fail 'Неожиданный запрос к Fail2Ban.'
-                case ${3:-} in maxretry) printf '5\n';; findtime) printf '600\n';; bantime) printf '3600\n';;
+                case ${3:-} in maxretry) printf '%s\n' "${MOCK_RUNTIME_RETRY:-5}";; findtime) printf '600\n';; bantime) printf '3600\n';;
                     bantime.increment)
                         if [[ -n ${MOCK_RUNTIME_INCREMENT:-} ]]; then printf '%s\n' "$MOCK_RUNTIME_INCREMENT"
                         elif grep -Eq '^bantime.increment = true$' "$F2B_CONFIG"; then printf 'True\n'
-                        else printf 'False\n'; fi;;
+                        elif grep -Eq '^bantime.increment = false$' "$F2B_CONFIG"; then printf 'False\n'
+                        else printf 'None\n'; fi;;
                     bantime.factor)
                         value=$(sed -n 's/^bantime.factor = //p' "$F2B_CONFIG")
                         printf '%s\n' "${MOCK_RUNTIME_FACTOR:-${value:-None}}";;
@@ -91,14 +93,19 @@ reset_counts() {
     printf '0\n' > "$fixture/restarts"
     printf '0\n' > "$fixture/sleeps"
     printf '0\n' > "$fixture/backups"
-    MOCK_FAILURE='' MOCK_FOREIGN_JAIL=0 MOCK_DBFILE_NONE=0 MOCK_ACTIVE=1 DRY_RUN=0
-    MOCK_DBPURGE_OUTPUT='' MOCK_DBFILE_OUTPUT='' MOCK_RUNTIME_INCREMENT='' MOCK_RUNTIME_FACTOR='' MOCK_RUNTIME_MAX=''
+    MOCK_FAILURE='' MOCK_FOREIGN_JAIL=0 MOCK_DBFILE_NONE=0 MOCK_ACTIVE=1 MOCK_JAIL_ACTIVE=1 DRY_RUN=0
+    MOCK_DBPURGE_OUTPUT='' MOCK_DBFILE_OUTPUT='' MOCK_RUNTIME_INCREMENT='' MOCK_RUNTIME_FACTOR='' MOCK_RUNTIME_MAX='' MOCK_RUNTIME_RETRY=''
     MOCK_UNSUPPORTED_GET=0
 }
 set_policy() {
     rm -f -- "$F2B_CONFIG" "$F2B_GLOBAL_CONFIG" "$foreign"
     fail2ban_policy_jail_config "$1" > "$F2B_CONFIG"
     [[ $1 == normal ]] || fail2ban_policy_global_config "$1" > "$F2B_GLOBAL_CONFIG"
+    reset_counts
+}
+set_pre_policy() {
+    rm -f -- "$F2B_CONFIG" "$F2B_GLOBAL_CONFIG" "$foreign"
+    fail2ban_pre_policy_config > "$F2B_CONFIG"
     reset_counts
 }
 
@@ -119,6 +126,90 @@ MOCK_DBPURGE_OUTPUT=$'Current database purge age is:\n`- неизвестно'
 [[ $(fail2ban_policy_detect) == normal ]] || fail 'Обычная политика ошибочно зависит от dbpurgeage.'
 [[ $(fail2ban_policy_status) == *'История банов: не подтверждена'* ]] || fail 'Недоступная история базы неверно показана.'
 MOCK_DBPURGE_OUTPUT=''
+
+set_pre_policy
+[[ $(fail2ban-client get sshd bantime.increment) == None ]] || fail 'Mock прежнего файла не возвращает increment=None.'
+fail2ban_config_managed || fail 'Точный pre-policy файл toolkit не признан управляемым.'
+[[ $(fail2ban_policy_detect) == normal && $(fail2ban_policy_status) == *'Политика: Обычная'* ]] || fail 'Точный pre-policy файл с increment=None не определён как Normal.'
+printf 'OK: точный pre-policy файл с increment=None определяется как Normal.\n'
+MOCK_DBFILE_NONE=1
+[[ $(fail2ban_policy_detect) == normal ]] || fail 'Pre-policy Normal ошибочно зависит от включённой базы.'
+MOCK_DBFILE_NONE=0
+
+cp -a -- "$F2B_CONFIG" "$fixture/old-pre-policy"
+DRY_RUN=1
+pre_dry_output=$(fail2ban_policy_select adaptive) || fail 'Просмотр миграции pre-policy → Adaptive завершился ошибкой.'
+[[ $pre_dry_output == *'Текущая политика: Обычная'* && $pre_dry_output == *'прежняя обычная политика → Адаптивная'* \
+    && $pre_dry_output == *"$F2B_CONFIG"* && $pre_dry_output == *"$F2B_GLOBAL_CONFIG"* \
+    && $pre_dry_output == *'Режим просмотра: файлы, база и сервис не изменены.'* ]] || fail 'План миграции pre-policy показан неполно.'
+cmp -s "$F2B_CONFIG" "$fixture/old-pre-policy" || fail 'Dry-run изменил pre-policy файл.'
+[[ ! -e $F2B_GLOBAL_CONFIG && $(< "$fixture/restarts") == 0 && $(< "$fixture/backups") == 0 ]] || fail 'Dry-run изменил состояние при миграции pre-policy.'
+printf 'OK: pre-policy → Adaptive dry-run без изменений.\n'
+DRY_RUN=0
+
+fail2ban_policy_select adaptive >/dev/null || fail 'Миграция pre-policy → Adaptive не удалась.'
+[[ $(fail2ban_policy_detect) == adaptive && $(< "$fixture/restarts") == 1 && $(< "$fixture/backups") == 1 ]] || fail 'Adaptive после миграции не подтверждена.'
+cmp -s "$fixture/backup.1" "$fixture/old-pre-policy" || fail 'Резервная копия pre-policy файла не совпадает с оригиналом.'
+diff -q "$F2B_CONFIG" <(fail2ban_policy_jail_config adaptive) >/dev/null || fail 'Adaptive jail после миграции неверен.'
+diff -q "$F2B_GLOBAL_CONFIG" <(fail2ban_policy_global_config adaptive) >/dev/null || fail 'Global dbpurgeage после миграции неверен.'
+
+set_pre_policy
+cp -a -- "$F2B_CONFIG" "$fixture/old-pre-policy"
+MOCK_FAILURE=config
+if fail2ban_policy_select adaptive >/dev/null 2>&1; then fail 'Ошибка после записи Adaptive не вызвала откат.'; fi
+cmp -s "$F2B_CONFIG" "$fixture/old-pre-policy" || fail 'Откат не восстановил точно старый pre-policy файл.'
+[[ ! -e $F2B_GLOBAL_CONFIG && $(< "$fixture/restarts") == 1 ]] || fail 'Откат не восстановил прежнее состояние Fail2Ban.'
+MOCK_FAILURE=''
+[[ $(fail2ban_policy_detect) == normal ]] || fail 'После отката pre-policy не определяется как Normal.'
+printf 'OK: pre-policy → Adaptive с ошибкой и точным откатом.\n'
+
+set_pre_policy
+cp -a -- "$F2B_CONFIG" "$fixture/old-pre-policy"
+fail2ban_policy_select normal >/dev/null || fail 'Миграция pre-policy → Normal не удалась.'
+diff -q "$F2B_CONFIG" <(fail2ban_policy_jail_config normal) >/dev/null || fail 'В Normal не добавлен bantime.increment=false.'
+cmp -s "$fixture/backup.1" "$fixture/old-pre-policy" || fail 'При миграции в Normal отсутствует точная копия старого файла.'
+[[ $(fail2ban_policy_detect) == normal ]] || fail 'Normal после миграции не подтверждён.'
+
+set_pre_policy
+printf 'maxretry = 4\n' >> "$F2B_CONFIG"
+if fail2ban_config_managed; then fail 'Pre-policy файл с лишней строкой принят как управляемый.'; fi
+[[ $(fail2ban_policy_detect) == custom ]] || fail 'Pre-policy файл с лишней строкой ошибочно определён как Normal.'
+foreign_output=$(fail2ban_policy_select adaptive) || fail 'Чужой файл вызвал непредвиденную ошибку.'
+[[ $foreign_output == *'автоматическое изменение отменено'* && $(< "$fixture/restarts") == 0 ]] || fail 'Изменённый pre-policy файл не заблокировал миграцию.'
+
+set_pre_policy
+sed -i 's/^port = 22$/port = 2222/' "$F2B_CONFIG"
+if fail2ban_config_managed; then fail 'Pre-policy файл с другим портом принят как управляемый.'; fi
+[[ $(fail2ban_policy_detect) == custom ]] || fail 'Pre-policy файл с другим портом ошибочно определён как Normal.'
+
+set_pre_policy
+sed -i 's/^maxretry = 5$/maxretry = 4/' "$F2B_CONFIG"
+if fail2ban_config_managed; then fail 'Pre-policy файл с другим maxretry принят как управляемый.'; fi
+[[ $(fail2ban_policy_detect) == custom ]] || fail 'Pre-policy файл с другим maxretry ошибочно определён как Normal.'
+
+set_pre_policy
+sed -i '1d' "$F2B_CONFIG"
+if fail2ban_config_managed; then fail 'Pre-policy файл без заголовка принят как управляемый.'; fi
+[[ $(fail2ban_policy_detect) == custom ]] || fail 'Pre-policy файл без заголовка ошибочно определён как Normal.'
+
+set_pre_policy
+fail2ban_previous_config > "$F2B_CONFIG"
+[[ $(fail2ban_policy_detect) == custom ]] || fail 'increment=None с другим прежним форматом ошибочно определён как Normal.'
+printf 'OK: неизвестный файл с increment=None остаётся Custom.\n'
+
+set_pre_policy
+MOCK_RUNTIME_RETRY=4
+[[ $(fail2ban_policy_detect) == custom ]] || fail 'increment=None с другим runtime maxretry ошибочно определён как Normal.'
+
+set_pre_policy
+MOCK_FOREIGN_JAIL=1
+[[ $(fail2ban_policy_detect) == custom ]] || fail 'Чужая jail-конфигурация не остановила legacy Normal.'
+foreign_output=$(fail2ban_policy_select adaptive) || fail 'Чужая jail-конфигурация вызвала непредвиденную ошибку.'
+[[ $foreign_output == *'автоматическое изменение отменено'* && $(< "$fixture/restarts") == 0 ]] || fail 'Чужая jail-конфигурация не запретила миграцию.'
+
+set_pre_policy
+MOCK_JAIL_ACTIVE=0
+[[ $(fail2ban_policy_detect) == custom ]] || fail 'Неактивный jail ошибочно подтвердил legacy Normal.'
 
 set_policy adaptive
 [[ $(fail2ban_policy_detect) == adaptive ]] || fail 'Адаптивная политика не определена.'

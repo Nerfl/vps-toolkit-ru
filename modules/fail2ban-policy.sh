@@ -104,6 +104,14 @@ fail2ban_policy_read_effective() {
     case $F2B_EFFECTIVE_INCREMENT in
         True|true) F2B_EFFECTIVE_INCREMENT=true;;
         False|false) F2B_EFFECTIVE_INCREMENT=false;;
+        None)
+            if [[ $F2B_EFFECTIVE_RETRY == 5 && $F2B_EFFECTIVE_FIND == 600 && $F2B_EFFECTIVE_BAN == 3600 ]] \
+                && fail2ban_pre_policy_managed && service_active fail2ban \
+                && fail2ban-client status sshd >/dev/null 2>&1 && ! fail2ban_existing_custom; then
+                F2B_EFFECTIVE_INCREMENT=false
+            else
+                return 1
+            fi;;
         *) return 1;;
     esac
     F2B_EFFECTIVE_FACTOR='' F2B_EFFECTIVE_MAX='' F2B_EFFECTIVE_DB='' F2B_EFFECTIVE_DBFILE=''
@@ -313,6 +321,14 @@ fail2ban_policy_select() {
     case $policy in adaptive) required=2592000;; strict) required=7776000;; esac
     if (( required )); then fail2ban_foreign_db_policy "$required" || return 0; fi
     current=$(fail2ban_policy_detect)
+    if fail2ban_pre_policy_managed; then
+        if [[ $current != normal ]]; then
+            say_warn 'Прежняя конфигурация toolkit не подтверждена действующим jail; миграция отменена.'
+            return 0
+        fi
+        say_info 'Текущая политика: Обычная.'
+        say_info "План перехода: прежняя обычная политика → $label."
+    fi
     if [[ $current == "$policy" ]] && fail2ban_policy_files_match "$policy"; then
         say_ok "Политика $label уже действует; изменений не требуется."; return 0
     fi
