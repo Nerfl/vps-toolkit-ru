@@ -29,6 +29,14 @@ done
 for address in '1.2.3.4; rm -rf /' 999.1.1.1 001.2.3.4 1.2.3 1.2.3.4: 1:::2 1:2:3:4:5:6:7:8:9; do
     if valid_ip "$address"; then fail "Неправильный IP принят: $address"; fi
 done
+log_fixture=$(printf '%s\n' \
+    '2026-10-08 01:00:00 [sshd] Ban 192.0.2.10' \
+    '2026-10-08 01:01:00 [sshd] Unban 2001:db8::10' \
+    '2026-10-08 01:02:00 [sshd] Found 2001:db8::20' \
+    '2026-10-08 01:03:00 [sshd] Ban 1:::2')
+formatted_log=$(fail2ban_format_log <<< "$log_fixture") || fail 'Форматирование журнала Fail2Ban завершилось ошибкой.'
+[[ $formatted_log == *'Блокировка 192.0.2.10'* && $formatted_log == *'Разблокировка 2001:db8::10'* \
+    && $formatted_log == *'Обнаружена попытка входа 2001:db8::20'* && $formatted_log != *1:::2* ]] || fail 'Журнал Fail2Ban неверно распознал IPv4, IPv6 или некорректный адрес.'
 for answer in y Y; do
     confirmation=$(printf '%s\n' "$answer" | confirm_yes_no 'Тестовое подтверждение?') || fail "Ответ $answer не принят как подтверждение."
     [[ $confirmation == *'[y/N]:'* ]] || fail 'Формат приглашения подтверждения неверен.'
@@ -176,6 +184,8 @@ MOCK_SS_OUTPUT=$(printf '%s\n' \
     'LISTEN 0 128 [::1]:6010 [::]:* users:(("sshd",pid=456,fd=6))')
 x11_listener=$(fail2ban_ssh_port_safe) || fail 'X11 forwarding ошибочно принят за серверный SSH-порт.'
 [[ $x11_listener == *'Порт SSH 22 подтверждён'* && $x11_listener != *6010* ]] || fail 'Дочерний SSH/X11 listener не исключён.'
+audit_x11=$(audit_ssh_listener) || fail 'Аудит основного SSH listener завершился ошибкой.'
+[[ $audit_x11 == *'0.0.0.0:22 / [::]:22'* && $audit_x11 != *6010* ]] || fail 'Аудит принял X11 6010 за входной порт SSH.'
 MOCK_SS_OUTPUT='LISTEN 0 128 127.0.0.1:22 0.0.0.0:* users:(("sshd",pid=123,fd=3))'
 loopback_server=$(fail2ban_ssh_port_safe) || fail 'Настоящий SSH listener на loopback ошибочно отклонён.'
 [[ $loopback_server == *'Порт SSH 22 подтверждён'* ]] || fail 'SSH listener на loopback не подтверждён.'
@@ -191,6 +201,8 @@ MOCK_SOCKET_LISTEN='ListenStream=22'
 MOCK_SS_OUTPUT='LISTEN 0 128 0.0.0.0:22 0.0.0.0:* users:(("systemd",pid=1,fd=3))'
 socket_listener=$(fail2ban_install_configure) || fail 'Проверка ssh.socket завершилась ошибкой.'
 [[ $socket_listener == *'Порт SSH 22 подтверждён'* ]] || fail 'Активный ssh.socket на порту 22 не распознан.'
+audit_socket=$(audit_ssh_listener) || fail 'Аудит ssh.socket завершился ошибкой.'
+[[ $audit_socket == 'SSH слушает: 0.0.0.0:22' ]] || fail 'Аудит не определил listener активного ssh.socket.'
 MOCK_SOCKET_LISTEN=$(printf '%s\n' 'Listen=0.0.0.0:22 (Stream)' 'Listen=[::]:22 (Stream)')
 socket_dual_stack=$(fail2ban_ssh_port_safe) || fail 'Два ListenStream ssh.socket на порту 22 не распознаны.'
 [[ $socket_dual_stack == *'Порт SSH 22 подтверждён'* ]] || fail 'IPv4 и IPv6 ssh.socket не объединены.'
@@ -209,6 +221,7 @@ MOCK_SS_OUTPUT='LISTEN 0 128 0.0.0.0:22 0.0.0.0:* users:(("sshd",pid=123,fd=3))'
 MOCK_MAIN_PID=0
 unknown_main_pid=$(fail2ban_install_configure) || fail 'Проверка неизвестного MainPID завершилась ошибкой.'
 [[ $unknown_main_pid == *'MainPID службы ssh.service не определён'* && $unknown_main_pid == *'Автоматическая настройка jail отменена'* ]] || fail 'Неизвестный MainPID не остановил настройку.'
+[[ $(audit_ssh_listener) == 'SSH слушает: Не удалось определить' ]] || fail 'Аудит угадал SSH listener при неизвестном MainPID.'
 MOCK_MAIN_PID=123
 rm -f -- "$F2B_CONFIG"
 external_jail=$(fail2ban_install_configure) || fail 'Проверка внешнего jail завершилась ошибкой.'
@@ -389,3 +402,4 @@ printf 'OK: синтаксис, модули, версия, IP, SSH, Fail2Ban, s
 bash "$ROOT_DIR/tests/policy-smoke-test.sh" || fail 'Проверки политик Fail2Ban завершились ошибкой.'
 bash "$ROOT_DIR/tests/bbr-smoke-test.sh" || fail 'Проверки BBR завершились ошибкой.'
 bash "$ROOT_DIR/tests/menu-smoke-test.sh" || fail 'Проверки навигации меню завершились ошибкой.'
+bash "$ROOT_DIR/tests/backup-smoke-test.sh" || fail 'Проверки каталога backup завершились ошибкой.'

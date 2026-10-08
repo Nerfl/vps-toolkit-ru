@@ -52,8 +52,16 @@ audit_firewall() {
     else printf 'iptables: команда не найдена\n'; fi
 }
 
+audit_ssh_listener() {
+    local ports
+    if ports=$(ssh_listener_endpoints); then
+        ports=$(awk 'NF {printf "%s%s", sep, $0; sep=" / "} END {print ""}' <<< "$ports")
+        printf 'SSH слушает: %s\n' "$ports"
+    else printf 'SSH слушает: Не удалось определить\n'; fi
+}
+
 audit_server() {
-    local root_setting pass_setting cc available banned ports
+    local root_setting pass_setting cc available banned
     printf '\n════════ АУДИТ СЕРВЕРА ════════\n'
     system_info
     printf 'Текущее время: %s\n' "$(date '+%Y-%m-%d %H:%M:%S %Z')"
@@ -64,10 +72,7 @@ audit_server() {
     else say_warn 'Команда df не найдена.'; fi
     printf '\nСостояние SSH:\n'
     printf 'Сервис SSH: %s\n' "$(yes_no service_active ssh)"
-    if has_cmd ss; then
-        ports=$(ss -ltnp 2>/dev/null | awk '/sshd/ {print $4}' | sort -u)
-        printf 'SSH слушает: %s\n' "${ports:-Не удалось определить}"
-    else printf 'Слушающие адреса SSH: команда ss недоступна\n'; fi
+    audit_ssh_listener
     root_setting=$(ssh_setting permitrootlogin)
     pass_setting=$(ssh_setting passwordauthentication)
     printf 'PermitRootLogin: %s\n' "$root_setting"

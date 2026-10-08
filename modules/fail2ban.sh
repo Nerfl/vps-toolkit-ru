@@ -59,68 +59,13 @@ fail2ban_config_managed() {
         || diff -q "$F2B_CONFIG" <(fail2ban_policy_jail_config strict) >/dev/null 2>&1
 }
 
-fail2ban_socket_listen_ports() {
-    local output line token previous endpoint port
-    local -a tokens
-    output=$(systemctl show -p Listen --value ssh.socket 2>/dev/null) || return 1
-    [[ -n $output ]] || return 1
-    while IFS= read -r line; do
-        read -r -a tokens <<< "$line"
-        previous=''
-        for token in "${tokens[@]}"; do
-            case "$token" in
-                ListenStream=*) endpoint=${token#ListenStream=} ;;
-                '(Stream)') endpoint=${previous#Listen=} ;;
-                *) previous=$token; continue ;;
-            esac
-            port=${endpoint##*:}
-            [[ $port =~ ^[0-9]+$ ]] && (( 10#$port >= 1 && 10#$port <= 65535 )) || return 1
-            printf '%s\n' "$port"
-            previous=$token
-        done
-    done <<< "$output"
-}
-
 fail2ban_ssh_port_safe() {
-    local configured listening line endpoint port ports='' socket_ports='' main_pid='' state recv send peer rest
-    if ! has_cmd sshd || ! has_cmd ss; then
-        say_warn 'Нет sshd или ss: невозможно сверить настроенный и фактический порт SSH.'; return 1
-    fi
-    configured=$(sshd -T 2>/dev/null) || { say_warn 'Не удалось получить действующую конфигурацию sshd.'; return 1; }
-    configured=$(awk '$1 == "port" {print $2}' <<< "$configured" | sort -u)
+    local configured listening
+    configured=$(ssh_listener_configured_ports) || { say_warn 'Не удалось получить действующую конфигурацию sshd.'; return 1; }
     if [[ $configured != 22 ]]; then
         say_warn "Настроенные порты SSH: ${configured:-неизвестно}; требуется единственный порт 22."; return 1
     fi
-    if service_active ssh.socket; then
-        socket_ports=$(fail2ban_socket_listen_ports) || { say_warn 'Не удалось прочитать TCP ListenStream активного ssh.socket.'; return 1; }
-        socket_ports=$(awk 'NF && !seen[$0]++ {printf "%s%s", sep, $0; sep=" "} END {print ""}' <<< "$socket_ports")
-        [[ -n $socket_ports ]] || { say_warn 'TCP ListenStream активного ssh.socket не определён.'; return 1; }
-        [[ $socket_ports == 22 ]] || { say_warn "Порты ssh.socket: $socket_ports; требуется единственный порт 22."; return 1; }
-    fi
-    if service_active ssh.service; then
-        main_pid=$(systemctl show -p MainPID --value ssh.service 2>/dev/null) || {
-            say_warn 'Не удалось определить MainPID службы ssh.service.'; return 1;
-        }
-        main_pid=${main_pid#MainPID=}
-        [[ $main_pid =~ ^[1-9][0-9]*$ ]] || { say_warn 'MainPID службы ssh.service не определён однозначно.'; return 1; }
-    fi
-    [[ -n $main_pid || -n $socket_ports ]] || { say_warn 'Ни ssh.service, ни ssh.socket не подтверждены как активные.'; return 1; }
-    listening=$(ss -H -ltnp 2>/dev/null) || { say_warn 'Не удалось получить список TCP listener через ss.'; return 1; }
-    while IFS= read -r line; do
-        read -r state recv send endpoint peer rest <<< "$line"
-        [[ $state == LISTEN && $endpoint == *:* ]] || continue
-        port=${endpoint##*:}
-        [[ $port =~ ^[0-9]+$ ]] || { say_warn 'Не удалось разобрать фактический порт SSH.'; return 1; }
-        if [[ -n $main_pid && $line == *"\"sshd\",pid=$main_pid,"* ]]; then :
-        elif [[ -n $socket_ports && " $socket_ports " == *" $port "* && $line == *'"systemd",pid=1,'* ]]; then :
-        else continue; fi
-        ports+="$port "
-    done <<< "$listening"
-    [[ -n $ports ]] || { say_warn 'Фактический TCP listener SSH не определён.'; return 1; }
-    ports=$(tr ' ' '\n' <<< "$ports" | awk 'NF && !seen[$0]++ {printf "%s%s", sep, $0; sep=" "} END {print ""}')
-    [[ $ports == 22 ]] || {
-        say_warn "Фактические порты SSH: $ports; требуется единственный порт 22."; return 1;
-    }
+    listening=$(ssh_listener_endpoints) || { say_warn "$listening"; return 1; }
     say_info 'Порт SSH 22 подтверждён в sshd -T и listener основного sshd или ssh.socket.'
 }
 
@@ -347,6 +292,27 @@ fail2ban_unban() {
     fi
 }
 
+fail2ban_format_log() {
+    local line event ip candidate
+    local -a fields
+    while IFS= read -r line; do
+        read -r -a fields <<< "$line"
+        event='Служебное событие'
+        case " $line " in
+            *' Ban '*) event='Блокировка';;
+            *' Unban '*) event='Разблокировка';;
+            *' Found '*) event='Обнаружена попытка входа';;
+            *ERROR*) event='Ошибка';;
+            *WARNING*) event='Предупреждение';;
+        esac
+        ip=''
+        for candidate in "${fields[@]}"; do
+            if valid_ip "$candidate"; then ip=$candidate; fi
+        done
+        printf '%s %s %s %s\n' "${fields[0]:-}" "${fields[1]:-}" "$event" "$ip"
+    done
+}
+
 fail2ban_log() {
     local lines
     if [[ -r /var/log/fail2ban.log ]]; then lines=$(tail -n 40 /var/log/fail2ban.log)
@@ -354,19 +320,7 @@ fail2ban_log() {
     else say_warn 'Журнал Fail2Ban недоступен.'; return; fi
     if [[ -z $lines ]]; then say_info 'Журнал Fail2Ban пуст.'; return; fi
     printf 'Последние события Fail2Ban (дата, время, тип, IP при наличии):\n'
-    awk '
-        {
-            event="Служебное событие"
-            if ($0 ~ / Ban /) event="Блокировка"
-            else if ($0 ~ / Unban /) event="Разблокировка"
-            else if ($0 ~ / Found /) event="Обнаружена попытка входа"
-            else if ($0 ~ /ERROR/) event="Ошибка"
-            else if ($0 ~ /WARNING/) event="Предупреждение"
-            ip=""
-            for (i=1; i<=NF; i++) if ($i ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/) ip=$i
-            print $1, $2, event, ip
-        }
-    ' <<< "$lines"
+    fail2ban_format_log <<< "$lines"
 }
 
 fail2ban_menu() {

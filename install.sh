@@ -5,6 +5,7 @@ set -o pipefail
 BASE_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 source "$BASE_DIR/lib/colors.sh"
 source "$BASE_DIR/lib/common.sh"
+source "$BASE_DIR/lib/ssh-listener.sh"
 source "$BASE_DIR/lib/logging.sh"
 source "$BASE_DIR/lib/backup.sh"
 source "$BASE_DIR/modules/system-info.sh"

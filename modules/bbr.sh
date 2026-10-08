@@ -118,7 +118,8 @@ bbr_sysctl_files() {
 }
 
 bbr_sysctl_conflicts() {
-    local root=${1:-} file files definitions key value ignore basename target label note
+    local root=${1:-} desired_cc=${2:-bbr} desired_qdisc=${3:-fq} mode=${4:-enable}
+    local file files definitions key value ignore basename target label note
     local issues='' earlier='' LC_ALL=C
     files=$(bbr_sysctl_files "$root") || { printf 'Не удалось полностью перечислить безопасные файлы sysctl.\n'; return 1; }
     [[ -n $files ]] || return 0
@@ -181,11 +182,13 @@ bbr_sysctl_conflicts() {
         [[ -n $definitions ]] || continue
         basename=${file##*/}
         while IFS=$'\t' read -r key value ignore; do
-            if [[ $key == net.core.default_qdisc ]]; then target=fq label=qdisc
-            else target=bbr label='TCP congestion control'; fi
+            if [[ $key == net.core.default_qdisc ]]; then target=$desired_qdisc label=qdisc
+            else target=$desired_cc label='TCP congestion control'; fi
             note=''
             [[ $ignore == 1 ]] && note=' (ведущий «-»: ошибка применения игнорируется)'
-            if [[ $file == "$root/etc/sysctl.conf" ]]; then
+            if [[ $mode == restore ]]; then
+                [[ $value == "$target" ]] || issues+="Внешняя настройка после удаления файла toolkit: $file: $key = $value; восстановление требует $target$note"$'\n'
+            elif [[ $file == "$root/etc/sysctl.conf" ]]; then
                 [[ $value == "$target" ]] || issues+="Позднее определение в $file: $key = $value$note"$'\n'
             elif [[ $basename < 99-vps-toolkit-bbr.conf ]]; then
                 [[ $value == "$target" ]] || earlier+="Более ранняя настройка $label: $file = $value$note"$'\n'
@@ -326,7 +329,7 @@ bbr_apply_disable() (
 )
 
 bbr_disable() {
-    local restore_cc restore_qdisc active_cc active_qdisc available
+    local sysctl_root=${1:-} restore_cc restore_qdisc active_cc active_qdisc available analysis
     if [[ ! -e $BBR_CONFIG && ! -L $BBR_CONFIG ]]; then say_info 'Конфигурация BBR toolkit отсутствует; другие настройки не меняются.'; return 0; fi
     if ! bbr_file_owned; then say_warn 'Файл BBR изменён вручную или является ссылкой; удаление отменено.'; return 0; fi
     active_cc=$(bbr_current) || { say_error 'Не удалось прочитать текущий TCP-алгоритм.'; return 1; }
@@ -343,6 +346,12 @@ bbr_disable() {
             restore_cc=cubic
         else say_error 'Безопасный алгоритм для возврата не найден; отключение отменено.'; return 1; fi
     fi
+    analysis=$(bbr_sysctl_conflicts "$sysctl_root" "$restore_cc" "$restore_qdisc" restore) || {
+        say_warn "${analysis:-Не удалось проверить оставшиеся источники sysctl.}"
+        say_warn 'Автоматическое отключение BBR отменено: внешняя настройка может изменить параметры после перезагрузки.'
+        say_info 'Файлы стороннего инструмента сохранены без изменений.'
+        return 0
+    }
     if ! confirm_yes_no "Удалить файл toolkit и установить $restore_cc / $restore_qdisc?"; then say_info 'Действие отменено.'; return 0; fi
     if (( DRY_RUN )); then say_info "План: сохранить копию, удалить $BBR_CONFIG и применить $restore_cc / $restore_qdisc."; return 0; fi
     prepare_mutation || return 1

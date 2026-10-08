@@ -185,6 +185,47 @@ if bbr_enable >/dev/null 2>&1; then fail 'Ошибка применения BBR 
 [[ $(< "$earlier") == '-net.core.default_qdisc = fq_codel' ]] || fail 'Откат изменил чужой файл.'
 printf 'OK: после ошибки rollback восстановил cubic/fq_codel и сохранил чужой файл.\n'
 
+reset_managed_bbr() {
+    bbr_config_content cubic fq_codel > "$BBR_CONFIG"
+    printf 'bbr\n' > "$fixture/current-cc"
+    printf 'fq\n' > "$fixture/current-qdisc"
+}
+backup_file() {
+    BACKUP_LAST=$fixture/etc/sysctl.d/backup-bbr
+    cp -a -- "$1" "$BACKUP_LAST"
+}
+reset_managed_bbr
+DRY_RUN=1
+safe_disable_plan=$(bbr_disable "$fixture") || fail 'Безопасный dry-run отключения BBR завершился ошибкой.'
+[[ $safe_disable_plan == *'План:'* && -f $BBR_CONFIG && $(< "$fixture/current-cc") == bbr ]] || fail 'Безопасный dry-run изменил BBR.'
+DRY_RUN=0
+bbr_disable "$fixture" >/dev/null || fail 'Отключение без внешнего конфликта не удалось.'
+[[ ! -e $BBR_CONFIG && $(< "$fixture/current-cc") == cubic && $(< "$fixture/current-qdisc") == fq_codel ]] || fail 'Безопасное отключение не восстановило параметры.'
+printf 'OK: отключение без внешнего конфликта разрешено и проверено.\n'
+
+external_disable=$fixture/etc/sysctl.d/99-remnawave-bbr.conf
+reset_managed_bbr
+printf '%s\n' 'net.core.default_qdisc=fq' 'net.ipv4.tcp_congestion_control=bbr' > "$external_disable"
+DRY_RUN=1
+external_dry=$(bbr_disable "$fixture") || fail 'Dry-run при внешнем BBR завершился ошибкой.'
+[[ $external_dry == *'Автоматическое отключение BBR отменено'* && -f $BBR_CONFIG && $(< "$fixture/current-cc") == bbr ]] || fail 'Dry-run не предупредил о внешнем BBR.'
+DRY_RUN=0
+external_result=$(bbr_disable "$fixture") || fail 'Конфликт внешнего BBR вызвал непредвиденную ошибку.'
+[[ $external_result == *'Автоматическое отключение BBR отменено'* && $external_result == *'Файлы стороннего инструмента сохранены'* \
+    && -f $BBR_CONFIG && $(< "$fixture/current-cc") == bbr && $(< "$fixture/current-qdisc") == fq ]] || fail 'Внешний BBR не остановил отключение.'
+printf '%s\n' 'net.ipv4.tcp_congestion_control=bbr' > "$external_disable"
+partial_result=$(bbr_disable "$fixture") || fail 'Частичный внешний BBR вызвал непредвиденную ошибку.'
+[[ $partial_result == *'Автоматическое отключение BBR отменено'* && -f $BBR_CONFIG ]] || fail 'Частичный внешний override не остановил отключение.'
+printf '%s\n' 'net.ipv4.tcp_congestion_control=cubic' 'net.core.default_qdisc=fq_codel' > "$external_disable"
+bbr_disable "$fixture" >/dev/null || fail 'Совпадающие с восстановлением внешние значения ошибочно заблокированы.'
+[[ ! -e $BBR_CONFIG && $(< "$fixture/current-cc") == cubic && $(< "$fixture/current-qdisc") == fq_codel ]] || fail 'Совпадающие внешние значения не позволили восстановить параметры.'
+reset_managed_bbr
+printf '%s\n' 'net .ipv4.tcp_congestion_control=bbr' > "$external_disable"
+ambiguous_disable=$(bbr_disable "$fixture") || fail 'Неоднозначный внешний sysctl вызвал непредвиденную ошибку.'
+[[ $ambiguous_disable == *'Автоматическое отключение BBR отменено'* && -f $BBR_CONFIG && $(< "$fixture/current-cc") == bbr ]] || fail 'Неоднозначный sysctl не заблокировал отключение.'
+rm -f -- "$external_disable"
+printf 'OK: полный, частичный и неоднозначный внешний sysctl блокируют отключение; совпадающий restore разрешён.\n'
+
 bbr_sysctl_files() { printf '%s\n' "$fixture/etc/sysctl.d/missing.conf"; }
 if missing_report=$(bbr_sysctl_conflicts); then fail 'Недоступный sysctl config не заблокировал BBR.'; fi
 [[ $missing_report == *'Недоступен или необычен источник sysctl'* ]] || fail 'Недоступный sysctl config не объяснён.'
