@@ -56,16 +56,19 @@ bbr_file_owned() {
 }
 
 bbr_sysctl_files() {
-    local root=${1:-} file dir canonical canonical_root prefix expected
+    local root=${1:-} file dir canonical canonical_root prefix expected basename link_target
     local managed="$root/etc/sysctl.d/99-vps-toolkit-bbr.conf"
-    local -A seen_dirs=()
-    has_cmd realpath || return 1
+    local -A seen_dirs=() seen_names=() seen_files=()
+    has_cmd realpath && has_cmd readlink || return 1
     canonical_root=$(realpath -e -- "${root:-/}") || return 1
     [[ $canonical_root != *$'\n'* ]] || return 1
     prefix=${canonical_root%/}
     file="$root/etc/sysctl.conf"
     if [[ -e $file || -L $file ]]; then
         [[ $file != *$'\n'* && -f $file && ! -L $file && -r $file ]] || return 1
+        canonical=$(realpath -e -- "$file") || return 1
+        [[ $canonical == "$prefix/etc/sysctl.conf" ]] || return 1
+        seen_files[$canonical]=1
         printf '%s\n' "$file"
     fi
     for dir in "$root"/etc/sysctl.d "$root"/run/sysctl.d "$root"/usr/local/lib/sysctl.d "$root"/usr/lib/sysctl.d "$root"/lib/sysctl.d; do
@@ -83,8 +86,32 @@ bbr_sysctl_files() {
         seen_dirs[$canonical]=1
         for file in "$dir"/*.conf; do
             [[ -e $file || -L $file ]] || continue
-            [[ $file != *$'\n'* && -f $file && ! -L $file && -r $file ]] || return 1
-            [[ $file == "$managed" ]] || printf '%s\n' "$file"
+            [[ $file != *$'\n'* ]] || return 1
+            basename=${file##*/}
+            if [[ -L $file ]]; then
+                [[ $file != "$managed" ]] || return 1
+                link_target=$(readlink -- "$file") || return 1
+                if [[ $link_target == /dev/null ]]; then
+                    [[ $(realpath -e -- "$file") == /dev/null ]] || return 1
+                elif [[ $file == "$root/etc/sysctl.d/99-sysctl.conf" \
+                    && ( $link_target == ../sysctl.conf || $link_target == "$root/etc/sysctl.conf" ) ]]; then
+                    [[ -f $file && -r $file && ! -L "$root/etc/sysctl.conf" ]] || return 1
+                    canonical=$(realpath -e -- "$file") || return 1
+                    [[ $canonical == "$prefix/etc/sysctl.conf" && -v seen_files[$canonical] ]] || return 1
+                else
+                    return 1
+                fi
+                seen_names[$basename]=1
+                continue
+            fi
+            [[ -f $file && -r $file ]] || return 1
+            canonical=$(realpath -e -- "$file") || return 1
+            [[ $canonical != *$'\n'* ]] || return 1
+            [[ -v seen_names[$basename] ]] && continue
+            seen_names[$basename]=1
+            [[ $file == "$managed" || -v seen_files[$canonical] ]] && continue
+            seen_files[$canonical]=1
+            printf '%s\n' "$file"
         done
     done
     return 0
@@ -226,7 +253,7 @@ bbr_apply_enable() (
 )
 
 bbr_enable() {
-    local old_cc old_qdisc saved_cc saved_qdisc analysis line
+    local sysctl_root=${1:-} old_cc old_qdisc saved_cc saved_qdisc analysis line
     old_cc=$(bbr_current) || { say_error 'Не удалось прочитать текущий TCP-алгоритм.'; return 1; }
     old_qdisc=$(bbr_qdisc) || { say_error 'Не удалось прочитать текущую очередь.'; return 1; }
     if [[ ! -e $BBR_CONFIG && ! -L $BBR_CONFIG && $old_cc == bbr && $old_qdisc == fq ]]; then
@@ -243,7 +270,7 @@ bbr_enable() {
     if [[ -e $BBR_CONFIG || -L $BBR_CONFIG ]] && ! bbr_file_owned; then
         say_warn 'Файл BBR изменён вручную или является ссылкой; автоматическая перезапись отменена.'; return 0
     fi
-    analysis=$(bbr_sysctl_conflicts) || {
+    analysis=$(bbr_sysctl_conflicts "$sysctl_root") || {
         say_warn "$analysis"
         say_warn 'Порядок или содержимое sysctl не подтверждены. Включение BBR отменено; чужие файлы не изменяются.'
         return 0
