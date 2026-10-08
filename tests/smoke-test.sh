@@ -92,7 +92,7 @@ fi
 MOCK_SYSCTL_FILE=''
 bbr_current() { printf 'bbr\n'; }
 external_bbr=$(bbr_enable) || fail 'Проверка внешней настройки BBR завершилась ошибкой.'
-[[ $external_bbr == *'вне toolkit'* ]] || fail 'Внешняя настройка BBR была присвоена toolkit.'
+[[ $external_bbr == *'qdisc — fq_codel'* && $external_bbr == *'автоматическое изменение отменено'* ]] || fail 'Неполная внешняя настройка BBR была присвоена toolkit.'
 bbr_current() { printf 'cubic\n'; }
 fail2ban_existing_custom() { return 1; }
 package_installed() { return 1; }

@@ -7,11 +7,29 @@ source "$ROOT_DIR/install.sh"
 fail() { printf 'ОШИБКА: %s\n' "$1" >&2; exit 1; }
 
 fixture=$(mktemp -d) || fail 'Не удалось создать временный каталог BBR.'
-trap 'rm -f -- "$fixture/etc/sysctl.d/"* "$fixture/etc/sysctl.conf" "$fixture/current-cc" "$fixture/current-qdisc" "$fixture/fail-once"; rmdir -- "$fixture/etc/sysctl.d" "$fixture/etc" "$fixture" 2>/dev/null || true' EXIT
+alias_root=$(mktemp -d) || fail 'Не удалось создать временный каталог для ссылок sysctl.'
+trap 'rm -f -- "$fixture/etc/sysctl.d/"* "$fixture/etc/sysctl.conf" "$fixture/current-cc" "$fixture/current-qdisc" "$fixture/fail-once" "$alias_root/lib/sysctl.d" "$alias_root/usr/lib/sysctl.d/"*.conf "$alias_root/external.conf"; rmdir -- "$fixture/etc/sysctl.d" "$fixture/etc" "$fixture" "$alias_root/elsewhere" "$alias_root/usr/lib/sysctl.d" "$alias_root/usr/lib" "$alias_root/usr" "$alias_root/lib" "$alias_root" 2>/dev/null || true' EXIT
 mkdir -p -- "$fixture/etc/sysctl.d" || fail 'Не удалось создать тестовую структуру sysctl.'
 BBR_CONFIG=$fixture/etc/sysctl.d/99-vps-toolkit-bbr.conf
 earlier=$fixture/etc/sysctl.d/10-bufferbloat.conf
 printf '%s\n' '-net.core.default_qdisc = fq_codel' > "$earlier"
+
+mkdir -p -- "$alias_root/usr/lib/sysctl.d" "$alias_root/lib" || fail 'Не удалось создать каталог проверки symlink.'
+printf '%s\n' 'net.core.default_qdisc = fq_codel' > "$alias_root/usr/lib/sysctl.d/10-alias.conf"
+ln -s ../usr/lib/sysctl.d "$alias_root/lib/sysctl.d" || fail 'Не удалось создать штатный symlink каталога.'
+alias_files=$(bbr_sysctl_files "$alias_root") || fail 'Штатный alias /lib/sysctl.d ошибочно отклонён.'
+[[ $alias_files == "$alias_root/usr/lib/sysctl.d/10-alias.conf" ]] || fail 'Canonical alias прочитан повторно или неверно.'
+printf 'OK: /lib/sysctl.d → /usr/lib/sysctl.d распознан один раз.\n'
+rm -f -- "$alias_root/lib/sysctl.d"
+mkdir -p -- "$alias_root/elsewhere" || fail 'Не удалось создать необычный каталог sysctl.'
+ln -s ../elsewhere "$alias_root/lib/sysctl.d" || fail 'Не удалось создать необычный symlink каталога.'
+if bbr_sysctl_files "$alias_root" >/dev/null; then fail 'Неожиданный symlink каталога принят.'; fi
+rm -f -- "$alias_root/lib/sysctl.d"
+printf '%s\n' 'net.core.default_qdisc=fq' > "$alias_root/external.conf"
+ln -s ../../../external.conf "$alias_root/usr/lib/sysctl.d/20-link.conf" || fail 'Не удалось создать symlink файла.'
+if bbr_sysctl_files "$alias_root" >/dev/null; then fail 'Symlink файла конфигурации принят.'; fi
+rm -f -- "$alias_root/usr/lib/sysctl.d/20-link.conf"
+printf 'OK: неожиданный symlink каталога и symlink файла блокируются.\n'
 
 earlier_report=$(bbr_sysctl_conflicts "$fixture") || fail 'Более ранняя настройка qdisc ошибочно заблокировала BBR.'
 [[ $earlier_report == *"$earlier = fq_codel"* && $earlier_report == *'ведущий «-»'* ]] || fail 'Ранняя настройка и смысл ведущего «-» не показаны.'
@@ -51,6 +69,7 @@ modprobe() { fail 'Тест вызвал modprobe.'; }
 lsmod() { printf 'tcp_bbr 0 0\n'; }
 bbr_sysctl_files() {
     local file
+    (( ${MOCK_BAD_SCAN:-0} == 0 )) || return 1
     for file in "$fixture/etc/sysctl.conf" "$fixture/etc/sysctl.d/"*.conf; do
         [[ -e $file && $file != "$BBR_CONFIG" ]] && printf '%s\n' "$file"
     done
@@ -59,6 +78,24 @@ bbr_sysctl_files() {
 sysctl() { fail 'В dry-run вызван sysctl.'; }
 
 DRY_RUN=1
+printf '%s\n' 'net.core.default_qdisc = fq' 'net.ipv4.tcp_congestion_control = bbr' > "$fixture/etc/sysctl.d/99-remnawave-bbr.conf"
+printf '%s\n' bbr > "$fixture/current-cc"
+printf '%s\n' fq > "$fixture/current-qdisc"
+external_output=$(bbr_enable) || fail 'Работающий внешний BBR вызвал ошибку.'
+[[ $external_output == *'BBR уже активен: bbr / fq'* && $external_output == *'Настройка выполнена вне VPS Toolkit RU'* \
+    && $external_output == *'Существующие настройки сохранены без изменений'* && ! -e $BBR_CONFIG ]] || fail 'Работающий внешний BBR не распознан.'
+MOCK_BAD_SCAN=1
+external_bad_scan=$(bbr_enable) || fail 'Сбой внешней диагностики изменил результат для работающего BBR.'
+[[ $external_bad_scan == *'BBR уже активен: bbr / fq'* && ! -e $BBR_CONFIG ]] || fail 'Работающий BBR ошибочно зависит от разбора чужой конфигурации.'
+printf '%s\n' fq_codel > "$fixture/current-qdisc"
+partial_output=$(bbr_enable) || fail 'Неполное внешнее состояние BBR вызвало непредвиденную ошибку.'
+[[ $partial_output == *'BBR активен, но текущий qdisc — fq_codel'* && ! -e $BBR_CONFIG ]] || fail 'BBR с qdisc, отличным от fq, ошибочно принят как управляемый.'
+MOCK_BAD_SCAN=0
+[[ $(< "$fixture/etc/sysctl.d/99-remnawave-bbr.conf") == *'net.ipv4.tcp_congestion_control = bbr'* ]] || fail 'Внешний BBR-файл изменён.'
+rm -f -- "$fixture/etc/sysctl.d/99-remnawave-bbr.conf"
+printf '%s\n' cubic > "$fixture/current-cc"
+printf 'OK: внешний bbr/fq сохранён при штатной и ошибочной диагностике; bbr/fq_codel не присваивается toolkit.\n'
+
 printf '%s\n' 'net.core.default_qdisc = fq_codel' > "$fixture/etc/sysctl.d/99-z.conf"
 late_enable=$(bbr_enable) || fail 'Поздний конфликт вызвал непредвиденную ошибку.'
 [[ $late_enable == *'Включение BBR отменено'* && ! -e $BBR_CONFIG ]] || fail 'Поздний sysctl-файл не отменил включение BBR.'

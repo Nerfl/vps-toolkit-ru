@@ -56,17 +56,36 @@ bbr_file_owned() {
 }
 
 bbr_sysctl_files() {
-    local root=${1:-} file dir managed="$root/etc/sysctl.d/99-vps-toolkit-bbr.conf"
+    local root=${1:-} file dir canonical canonical_root prefix expected
+    local managed="$root/etc/sysctl.d/99-vps-toolkit-bbr.conf"
+    local -A seen_dirs=()
+    has_cmd realpath || return 1
+    canonical_root=$(realpath -e -- "${root:-/}") || return 1
+    [[ $canonical_root != *$'\n'* ]] || return 1
+    prefix=${canonical_root%/}
+    file="$root/etc/sysctl.conf"
+    if [[ -e $file || -L $file ]]; then
+        [[ $file != *$'\n'* && -f $file && ! -L $file && -r $file ]] || return 1
+        printf '%s\n' "$file"
+    fi
     for dir in "$root"/etc/sysctl.d "$root"/run/sysctl.d "$root"/usr/local/lib/sysctl.d "$root"/usr/lib/sysctl.d "$root"/lib/sysctl.d; do
         [[ -e $dir || -L $dir ]] || continue
-        [[ -d $dir && ! -L $dir && -r $dir && -x $dir ]] || return 1
-    done
-    for file in "$root"/etc/sysctl.conf "$root"/etc/sysctl.d/*.conf "$root"/run/sysctl.d/*.conf \
-        "$root"/usr/local/lib/sysctl.d/*.conf "$root"/usr/lib/sysctl.d/*.conf "$root"/lib/sysctl.d/*.conf; do
-        [[ -e $file || -L $file ]] || continue
-        [[ $file != *$'\n'* ]] || return 1
-        [[ -f $file && ! -L $file && -r $file ]] || return 1
-        [[ $file == "$managed" ]] || printf '%s\n' "$file"
+        [[ -d $dir && -r $dir && -x $dir ]] || return 1
+        canonical=$(realpath -e -- "$dir") || return 1
+        [[ $canonical != *$'\n'* ]] || return 1
+        expected="$prefix${dir#"$root"}"
+        if [[ $dir == "$root/lib/sysctl.d" ]]; then
+            [[ $canonical == "$expected" || $canonical == "$prefix/usr/lib/sysctl.d" ]] || return 1
+        else
+            [[ $canonical == "$expected" ]] || return 1
+        fi
+        [[ -v seen_dirs[$canonical] ]] && continue
+        seen_dirs[$canonical]=1
+        for file in "$dir"/*.conf; do
+            [[ -e $file || -L $file ]] || continue
+            [[ $file != *$'\n'* && -f $file && ! -L $file && -r $file ]] || return 1
+            [[ $file == "$managed" ]] || printf '%s\n' "$file"
+        done
     done
     return 0
 }
@@ -208,19 +227,27 @@ bbr_apply_enable() (
 
 bbr_enable() {
     local old_cc old_qdisc saved_cc saved_qdisc analysis line
+    old_cc=$(bbr_current) || { say_error 'Не удалось прочитать текущий TCP-алгоритм.'; return 1; }
+    old_qdisc=$(bbr_qdisc) || { say_error 'Не удалось прочитать текущую очередь.'; return 1; }
+    if [[ ! -e $BBR_CONFIG && ! -L $BBR_CONFIG && $old_cc == bbr && $old_qdisc == fq ]]; then
+        say_ok 'BBR уже активен: bbr / fq.'
+        say_info 'Настройка выполнена вне VPS Toolkit RU.'
+        say_info 'Существующие настройки сохранены без изменений.'
+        return 0
+    fi
+    if [[ ! -e $BBR_CONFIG && ! -L $BBR_CONFIG && $old_cc == bbr ]]; then
+        say_warn "BBR активен, но текущий qdisc — $old_qdisc (ожидается fq)."
+        say_info 'Настройка выполнена вне VPS Toolkit RU; автоматическое изменение отменено.'
+        return 0
+    fi
     if [[ -e $BBR_CONFIG || -L $BBR_CONFIG ]] && ! bbr_file_owned; then
         say_warn 'Файл BBR изменён вручную или является ссылкой; автоматическая перезапись отменена.'; return 0
     fi
-    old_cc=$(bbr_current) || { say_error 'Не удалось прочитать текущий TCP-алгоритм.'; return 1; }
-    old_qdisc=$(bbr_qdisc) || { say_error 'Не удалось прочитать текущую очередь.'; return 1; }
     analysis=$(bbr_sysctl_conflicts) || {
         say_warn "$analysis"
         say_warn 'Порядок или содержимое sysctl не подтверждены. Включение BBR отменено; чужие файлы не изменяются.'
         return 0
     }
-    if [[ $old_cc == bbr && ! -e $BBR_CONFIG ]]; then
-        say_info 'BBR уже настроен вне toolkit. Эта настройка сохранена без изменений.'; return 0
-    fi
     if [[ $old_cc == bbr && $old_qdisc == fq && -f $BBR_CONFIG ]]; then
         say_ok 'BBR сейчас активен; конфликтующих определений в проверенных файлах не найдено.'
         say_info 'Постоянство настройки после перезагрузки не гарантируется; проверьте её после плановой перезагрузки.'
